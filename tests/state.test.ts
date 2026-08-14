@@ -136,6 +136,21 @@ describe('tryClaim (claim_slot RPC)', () => {
     expect(calls[0].body).toMatchObject({ p_unlock: false });
   });
 
+  it('setDailyLimit upserts the per-user override (works before the first claim)', async () => {
+    const calls = stubFetch(() => ({ status: 201, body: [{ user_member_id: 'm', daily_limit: 2 }] }));
+    await createStore().setDailyLimit('m', 2);
+    expect(calls[0].method).toBe('POST');
+    expect(decodeURIComponent(calls[0].url)).toContain('on_conflict=user_member_id');
+    expect(calls[0].headers.Prefer).toBe('resolution=merge-duplicates');
+    expect(calls[0].body).toMatchObject({ user_member_id: 'm', daily_limit: 2 });
+  });
+
+  it('setDailyLimit(null) restores the env default', async () => {
+    const calls = stubFetch(() => ({ status: 201, body: [{ user_member_id: 'm', daily_limit: null }] }));
+    await createStore().setDailyLimit('m', null);
+    expect(calls[0].body).toMatchObject({ user_member_id: 'm', daily_limit: null });
+  });
+
   it('reports won:false when the database rejects the claim', async () => {
     stubFetch(() => ({ body: [{ won: false }] }));
     const result = await createStore().tryClaim('m', '2026-08-14', 'A', 1, false);

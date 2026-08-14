@@ -334,37 +334,72 @@ describe('isEligible', () => {
 
   it('first run (no state) is eligible', () => {
     const state = { userMemberId: 'member-1', date: null, cardId: null, claimCount: 0, eligible: true, updatedAt: null };
-    expect(isEligible(state, cfg, TODAY)).toBe(true);
+    expect(isEligible(state, cfg.dailyLimit, TODAY)).toBe(true);
   });
 
   it('new day resets eligibility (the only reset)', () => {
     const state = { userMemberId: 'member-1', date: claimedDaysAgo(1), cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
-    expect(isEligible(state, cfg, TODAY)).toBe(true);
+    expect(isEligible(state, cfg.dailyLimit, TODAY)).toBe(true);
   });
 
   it('same day, claimed, at the limit → not eligible', () => {
     const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
-    expect(isEligible(state, cfg, TODAY)).toBe(false);
+    expect(isEligible(state, cfg.dailyLimit, TODAY)).toBe(false);
   });
 
   it('same day, claimed card in Code Review → still NOT eligible (one per day)', () => {
     const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
-    expect(isEligible(state, cfg, TODAY)).toBe(false);
+    expect(isEligible(state, cfg.dailyLimit, TODAY)).toBe(false);
   });
 
   it('eligible=true state does not unlock the same-day slot', () => {
     const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: true, updatedAt: null };
-    expect(isEligible(state, cfg, TODAY)).toBe(false);
+    expect(isEligible(state, cfg.dailyLimit, TODAY)).toBe(false);
   });
 
   it('under the daily limit → eligible', () => {
     const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 0, eligible: false, updatedAt: null };
-    expect(isEligible(state, cfg, TODAY)).toBe(true);
+    expect(isEligible(state, cfg.dailyLimit, TODAY)).toBe(true);
   });
 
-  it('unlimited (DAILY_LIMIT=0) → always eligible', () => {
-    const cfg0 = makeConfig({ dailyLimit: 0 });
+  it('unlimited (limit 0) → always eligible', () => {
     const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 9, eligible: false, updatedAt: null };
-    expect(isEligible(state, cfg0, TODAY)).toBe(true);
+    expect(isEligible(state, 0, TODAY)).toBe(true);
+  });
+
+});
+
+describe('claimCard — per-user daily limit override', () => {
+  it('state.dailyLimit=2 at count 1 (env limit 1) → second claim is allowed', async () => {
+    const cfg = makeConfig({ dailyLimit: 1 });
+    const trello = new FakeTrello([card('A', 'list-todo'), card('B', 'list-todo')]);
+    const store = new FakeClaimStore();
+    const deps = { config: cfg, trello, store, timing: new Timing() };
+
+    const ra = await claimCard('A', deps);
+    expect(ra.outcome).toBe('CLAIMED');
+
+    // The database override (2/day) lifts the env default (1/day) for the
+    // second card, as long as the user is not already in To Do/Doing.
+    await store.setDailyLimit('member-1', 2);
+    trello.cards.get('A')!.idList = 'list-done'; // free the To Do/Doing checks
+    const rb = await claimCard('B', deps);
+    expect(rb.outcome).toBe('CLAIMED');
+    expect(store.state.claimCount).toBe(2);
+    expect(store.state.dailyLimit).toBe(2);
+  });
+
+  it('state.dailyLimit=0 (unlimited) → claims keep coming', async () => {
+    const cfg = makeConfig({ dailyLimit: 1 });
+    const trello = new FakeTrello([card('A', 'list-todo'), card('B', 'list-todo')]);
+    const store = new FakeClaimStore();
+    await store.setDailyLimit('member-1', 0);
+    const deps = { config: cfg, trello, store, timing: new Timing() };
+
+    const [ra, rb] = await Promise.all([
+      claimCard('A', deps),
+      claimCard('B', deps),
+    ]);
+    expect([ra.outcome, rb.outcome].filter((o) => o === 'CLAIMED')).toHaveLength(2);
   });
 });

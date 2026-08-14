@@ -20,6 +20,7 @@ const cfg = makeConfig();
 const trelloMock = {
   getCard: vi.fn(),
   getMyCards: vi.fn(),
+  getBoard: vi.fn(),
   addMemberToCard: vi.fn(),
   listWebhooks: vi.fn(),
   createWebhook: vi.fn(),
@@ -41,6 +42,7 @@ describe('status route', () => {
     vi.mocked(getStore).mockReturnValue(new FakeClaimStore());
     vi.mocked(createTrelloClient).mockReturnValue(trelloMock as never);
     trelloMock.listWebhooks.mockResolvedValue([]);
+    trelloMock.getBoard.mockResolvedValue({ id: cfg.trelloBoardId, name: 'Unique Sites' });
   });
 
   it('rejects without the admin token', async () => {

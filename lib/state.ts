@@ -44,6 +44,12 @@ export interface ClaimState {
   /** Number of cards claimed on `date`. */
   claimCount: number;
   eligible: boolean;
+  /**
+   * Per-user daily-limit override (0 = unlimited). Null = fall back to the
+   * DAILY_LIMIT env default. Optional so callers that don't need it (and older
+   * in-memory fakes) can omit it.
+   */
+  dailyLimit?: number | null;
   updatedAt: string | null;
 }
 
@@ -88,9 +94,8 @@ export interface ClaimStore {
   getState(memberId: string): Promise<ClaimState>;
   /**
    * Atomically claim a slot for today, enforcing the daily limit. Exactly one
-   * concurrent caller wins per allowed slot. `unlock` folds the Code-Review
-   * self-heal into the same atomic call (the WHERE clause accepts it, so no
-   * separate eligibility write is needed).
+   * concurrent caller wins per allowed slot. `unlock` is retained for the RPC
+   * signature but the app always passes false — Code Review never unlocks.
    */
   tryClaim(
     memberId: string,
@@ -103,6 +108,11 @@ export interface ClaimStore {
   releaseClaim(memberId: string): Promise<void>;
   /** Code Review move: unlock today's claim for this card. Returns true if changed. */
   setEligible(memberId: string, cardId: string): Promise<boolean>;
+  /**
+   * Set the per-user daily-limit override (0 = unlimited). NULL restores the
+   * DAILY_LIMIT env default. Upserts: works for a user with no state row yet.
+   */
+  setDailyLimit(memberId: string, limit: number | null): Promise<void>;
   insertEvent(event: ClaimEventInsert): Promise<void>;
   getLatestEvent(): Promise<ClaimEventRow | null>;
 }
@@ -112,6 +122,7 @@ interface StateRow {
   card_id: string | null;
   claim_count: number | null;
   eligible: boolean | null;
+  daily_limit: number | null;
   updated_at: string | null;
 }
 
@@ -144,6 +155,7 @@ function normalizeState(row: StateRow | undefined, memberId: string): ClaimState
     cardId: row.card_id ?? null,
     claimCount: typeof row.claim_count === 'number' ? row.claim_count : 0,
     eligible: row.eligible === true,
+    dailyLimit: typeof row.daily_limit === 'number' ? row.daily_limit : null,
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
   };
 }
@@ -221,11 +233,41 @@ export function getStore(): ClaimStore {
 export function createStore(): ClaimStore {
   return {
     async getState(memberId: string): Promise<ClaimState> {
-      const rows = await supabase<StateRow[]>('/claim_state', {
-        method: 'GET',
-        query: `user_member_id=eq.${encodeURIComponent(memberId)}&select=date,card_id,claim_count,eligible,updated_at`,
+      const withLimit =
+        `user_member_id=eq.${encodeURIComponent(memberId)}` +
+        '&select=date,card_id,claim_count,eligible,daily_limit,updated_at';
+      try {
+        const rows = await supabase<StateRow[]>('/claim_state', {
+          method: 'GET',
+          query: withLimit,
+        });
+        return normalizeState(Array.isArray(rows) ? rows[0] : undefined, memberId);
+      } catch (err) {
+        // Pre-migration fallback: the daily_limit column may not be installed
+        // yet — read without it (limit defaults to null → env DAILY_LIMIT).
+        // This keeps the claim path live during the upgrade window.
+        if (!/daily_limit/i.test(err instanceof Error ? err.message : String(err))) throw err;
+        const rows = await supabase<StateRow[]>('/claim_state', {
+          method: 'GET',
+          query:
+            `user_member_id=eq.${encodeURIComponent(memberId)}` +
+            '&select=date,card_id,claim_count,eligible,updated_at',
+        });
+        const row = Array.isArray(rows) ? rows[0] : undefined;
+        if (row) row.daily_limit = null;
+        return normalizeState(row, memberId);
+      }
+    },
+
+    async setDailyLimit(memberId, limit): Promise<void> {
+      // Upsert so it works before the first claim: merge-duplicates updates
+      // only daily_limit on an existing row and inserts one otherwise.
+      await supabase('/claim_state', {
+        method: 'POST',
+        query: `on_conflict=user_member_id`,
+        prefer: 'resolution=merge-duplicates',
+        body: { user_member_id: memberId, daily_limit: limit },
       });
-      return normalizeState(Array.isArray(rows) ? rows[0] : undefined, memberId);
     },
 
     async tryClaim(memberId, date, cardId, dailyLimit, unlock): Promise<SlotResult> {

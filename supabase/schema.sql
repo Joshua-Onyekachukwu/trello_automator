@@ -16,11 +16,14 @@ create table if not exists claim_state (
   card_id        text,                       -- currently claimed card, if any
   eligible       boolean not null default true,
   claim_count    integer not null default 0, -- cards claimed on `date` (daily limit)
+  daily_limit    integer,                    -- per-user override (1, 2, ... or 0 = unlimited);
+                                              -- NULL = use the DAILY_LIMIT env default
   updated_at     timestamptz not null default now()
 );
 
 -- Upgrade path for an installation that predates the daily limit.
 alter table claim_state add column if not exists claim_count integer not null default 0;
+alter table claim_state add column if not exists daily_limit integer;
 -- A pre-existing claim (card_id set) counts as one claim for its day.
 update claim_state set claim_count = 1 where card_id is not null and claim_count = 0;
 

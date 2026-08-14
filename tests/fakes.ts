@@ -9,6 +9,7 @@ import type { Config } from '../lib/config';
 import type { ClaimEventInsert, ClaimEventRow, ClaimState, ClaimStore, SlotResult } from '../lib/state';
 import {
   TrelloApiError,
+  type TrelloBoard,
   type TrelloCard,
   type TrelloClient,
   type TrelloMyCard,
@@ -78,6 +79,10 @@ export class FakeTrello implements TrelloClient {
       .map((c) => ({ id: c.id, idList: c.idList, idBoard: c.idBoard, name: c.name }));
   }
 
+  async getBoard(boardId: string): Promise<TrelloBoard> {
+    return { id: boardId, name: 'Fake Board' };
+  }
+
   async addMemberToCard(cardId: string, memberId: string): Promise<void> {
     if ((this.postLatencyMs || this.latencyMs) > 0) await sleep(this.postLatencyMs || this.latencyMs);
     const c = this.cards.get(cardId);
@@ -111,6 +116,7 @@ export class FakeClaimStore implements ClaimStore {
     cardId: null,
     claimCount: 0,
     eligible: true,
+    dailyLimit: null,
     updatedAt: null,
   };
   readonly records: ClaimEventInsert[] = [];
@@ -180,6 +186,17 @@ export class FakeClaimStore implements ClaimStore {
         return true;
       }
       return false;
+    });
+  }
+
+  setDailyLimit(memberId: string, limit: number | null): Promise<void> {
+    return this.serial(async () => {
+      this.state = {
+        ...this.state,
+        userMemberId: memberId,
+        dailyLimit: limit,
+        updatedAt: new Date().toISOString(),
+      };
     });
   }
 

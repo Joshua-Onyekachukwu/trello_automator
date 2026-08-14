@@ -34,23 +34,29 @@ export async function GET(req: NextRequest): Promise<Response> {
   }
 
   try {
-    const [state, lastEvent, webhooks] = await Promise.all([
+    const trello = createTrelloClient();
+    const [state, lastEvent, webhooks, board] = await Promise.all([
       getStore().getState(cfg.trelloMemberId),
       getStore().getLatestEvent(),
-      createTrelloClient().listWebhooks(),
+      trello.listWebhooks(),
+      trello.getBoard(cfg.trelloBoardId).catch(() => ({ id: cfg.trelloBoardId, name: '' })),
     ]);
+    const dailyLimit = state.dailyLimit ?? cfg.dailyLimit;
 
     return json({
       ok: true,
       time: new Date().toISOString(),
       timezone: 'Africa/Lagos',
+      board: { id: board.id, name: board.name },
       config: {
         boardId: cfg.trelloBoardId,
         memberId: cfg.trelloMemberId,
         todoListId: cfg.todoListId,
         doingListId: cfg.doingListId,
         codeReviewListId: cfg.codeReviewListId,
-        dailyLimit: cfg.dailyLimit,
+        dailyLimitEnv: cfg.dailyLimit,
+        dailyLimit,
+        dailyLimitSource: state.dailyLimit != null ? 'database' : 'env',
       },
       state,
       lastEvent,

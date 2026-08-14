@@ -64,19 +64,21 @@ function payloadCardComplete(p: TargetCardInfo | null): p is TargetCardInfo & {
  *
  * Eligible only when:
  *   - it is a new Lagos day (or the user has never claimed), or
- *   - DAILY_LIMIT is 0 (unlimited), or
+ *   - the limit is 0 (unlimited), or
  *   - the number of cards claimed today is still under the daily limit.
  *
+ * `dailyLimit` is the effective limit — the per-user database override
+ * (state.dailyLimit) when set, otherwise the DAILY_LIMIT env default.
  * Code Review does NOT unlock the slot — the user's rule: after moving the
  * claimed card to Code Review, the next chance to pick another card comes
  * after the next Lagos midnight. The limit is also enforced atomically by the
  * database (claim_slot), so this check is the fast path — a race can only
  * make us stop, never exceed the limit.
  */
-export function isEligible(state: ClaimState, cfg: Config, today: string): boolean {
+export function isEligible(state: ClaimState, dailyLimit: number, today: string): boolean {
   if (state.date !== today) return true; // new Lagos day or first run
-  if (cfg.dailyLimit === 0) return true; // unlimited
-  return state.claimCount < cfg.dailyLimit; // still within the daily limit
+  if (dailyLimit === 0) return true; // unlimited
+  return state.claimCount < dailyLimit; // still within the daily limit
 }
 
 export async function claimCard(
@@ -134,8 +136,10 @@ export async function claimCard(
     }
 
     // Condition 5 — daily claim state. Code Review never unlocks the slot;
-    // only a new Lagos day resets it.
-    if (!isEligible(state, config, today)) {
+    // only a new Lagos day resets it. The effective limit is the per-user DB
+    // override when set (changeable from the status page), else the env default.
+    const dailyLimit = state.dailyLimit ?? config.dailyLimit;
+    if (!isEligible(state, dailyLimit, today)) {
       return await finish(store, makeRecord(cardId, 'NOT_ELIGIBLE', timing));
     }
 
@@ -144,7 +148,7 @@ export async function claimCard(
     // (the SQL keeps the parameter for compatibility; the app never triggers
     // it, so the effective rule is one claim per Lagos day). A losing caller
     // must stop immediately, before any Trello POST.
-    const slot = await store.tryClaim(memberId, today, cardId, config.dailyLimit, false);
+    const slot = await store.tryClaim(memberId, today, cardId, dailyLimit, false);
     slotWon = slot.won;
     if (!slot.won) {
       return await finish(store, makeRecord(cardId, 'NOT_ELIGIBLE', timing, { raceLost: true }));

@@ -44,9 +44,15 @@ export interface TrelloWebhookModel {
   active: boolean;
 }
 
+export interface TrelloBoard {
+  id: string;
+  name: string;
+}
+
 export interface TrelloClient {
   getCard(cardId: string): Promise<TrelloCard>;
   getMyCards(memberId: string): Promise<TrelloMyCard[]>;
+  getBoard(boardId: string): Promise<TrelloBoard>;
   addMemberToCard(cardId: string, memberId: string): Promise<void>;
   listWebhooks(): Promise<TrelloWebhookModel[]>;
   createWebhook(callbackURL: string, description: string): Promise<TrelloWebhookModel>;
@@ -125,6 +131,11 @@ export function createTrelloClient(): TrelloClient {
         idBoard: c.idBoard ?? '',
         name: c.name ?? '',
       }));
+    },
+
+    async getBoard(boardId) {
+      const data = (await trelloFetch(`/boards/${boardId}?fields=name`)) as Partial<TrelloBoard>;
+      return { id: data.id ?? boardId, name: data.name ?? '' };
     },
 
     async addMemberToCard(cardId, memberId) {
