@@ -57,7 +57,13 @@ begin
         claim_count = case when date = p_date then claim_count + 1 else 1 end,
         updated_at = now()
     where user_member_id = p_user
-      and (date <> p_date or p_unlock or p_limit = 0 or claim_count < p_limit);
+      and (
+        date <> p_date or        -- new Lagos day
+        eligible <> false or     -- unlocked by the Code Review webhook event
+        p_unlock or              -- Code Review self-heal derived from live Trello
+        p_limit = 0 or           -- unlimited
+        claim_count < p_limit    -- still under the daily limit
+      );
   get diagnostics updated_rows = row_count;
   if updated_rows = 1 then
     return query select true;
