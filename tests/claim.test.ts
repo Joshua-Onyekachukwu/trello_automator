@@ -5,8 +5,8 @@
  *  3. User already in To Do                   → DON'T CLAIM
  *  4. User already in Doing                   → DON'T CLAIM
  *  5. User not eligible                       → DON'T CLAIM
- *  6. Claimed card moved to Code Review       → eligible becomes true
- *  7. New day                                 → eligible becomes true
+ *  6. Claimed card moved to Code Review       → does NOT unlock the same day
+ *  7. New day                                 → eligible becomes true (only reset)
  *  8. Card not in To Do                       → IGNORE
  *  9. Duplicate webhook                       → must not claim twice
  * 10. Two cards arrive nearly simultaneously  → must not claim both
@@ -93,7 +93,7 @@ describe('claimCard', () => {
     expect(store.state.cardId).toBe('X');
   });
 
-  it('Test 6 — claimed card moved to Code Review → eligible becomes true and next card can be claimed', async () => {
+  it('Test 6 — claimed card moved to Code Review does NOT unlock the same-day slot → DON\'T CLAIM', async () => {
     const trello = new FakeTrello([
       card('A', 'list-todo'),
       card('X', 'list-cr', { idMembers: ['member-1'] }),
@@ -101,28 +101,24 @@ describe('claimCard', () => {
     const store = new FakeClaimStore();
     store.state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
 
-    // Code Review is an eligibility event only — it never assigns a card itself.
-    const updated = await store.setEligible('member-1', 'X');
-    expect(updated).toBe(true);
-    expect(store.state.eligible).toBe(true);
-
+    // Even though the claimed card X is now in Code Review, the daily slot
+    // stays locked until the next Lagos midnight — one card per day.
     const record = await claimCard('A', makeDeps(trello, store));
-    expect(record.outcome).toBe('CLAIMED');
-    expect(store.state.cardId).toBe('A');
+    expect(record.outcome).toBe('NOT_ELIGIBLE');
+    expect(trello.addMemberCalls).toHaveLength(0);
+    expect(store.state.cardId).toBe('X');
     expect(store.state.eligible).toBe(false);
   });
 
-  it('Test 6b — self-healing: missed Code Review webhook is derived from live cards', async () => {
-    const trello = new FakeTrello([
-      card('A', 'list-todo'),
-      card('X', 'list-cr', { idMembers: ['member-1'] }),
-    ]);
+  it('Test 6b — Code Review unlock state (eligible=true) does not grant a same-day claim', async () => {
+    const trello = new FakeTrello([card('A', 'list-todo')]);
     const store = new FakeClaimStore();
-    store.state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
+    store.state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: true, updatedAt: null };
 
-    // No setEligible call — claimCard must still notice X is in Code Review.
+    // A stale/manual eligible=true must NOT unlock the slot — only a new day.
     const record = await claimCard('A', makeDeps(trello, store));
-    expect(record.outcome).toBe('CLAIMED');
+    expect(record.outcome).toBe('NOT_ELIGIBLE');
+    expect(trello.addMemberCalls).toHaveLength(0);
   });
 
   it('Test 7 — new Lagos day → eligible becomes true regardless of yesterday', async () => {
@@ -190,7 +186,9 @@ describe('claimCard', () => {
     const store = new FakeClaimStore();
     const deps = { config: cfg, trello, store, timing: new Timing() };
 
-    // Real workflow: claim A, work it to Code Review → eligible again → claim B.
+    // Claim A, then move it to Code Review (so the user is no longer in
+    // To Do/Doing). The second claim is allowed by the limit (1 < 2), NOT by
+    // any Code Review unlock.
     const ra = await claimCard('A', deps);
     expect(ra.outcome).toBe('CLAIMED');
     trello.cards.get('A')!.idList = 'list-cr';
@@ -199,9 +197,8 @@ describe('claimCard', () => {
     expect(rb.outcome).toBe('CLAIMED');
     expect(store.state.claimCount).toBe(2);
 
-    // B finishes (moved past review): now 2 claims are used, nothing is in
-    // To Do/Doing, and nothing is in Code Review to unlock → the count ceiling
-    // binds: a third claim is refused.
+    // B finishes (moved past review): 2 claims used today → the count ceiling
+    // binds and a third claim is refused, no matter where B is.
     trello.cards.get('B')!.idList = 'list-done';
     const rc = await claimCard('C', deps);
     expect(rc.outcome).toBe('NOT_ELIGIBLE');
@@ -267,7 +264,7 @@ describe('claimCard', () => {
     expect(trello.getCardCalls).toBe(1); // correctness preserved via fallback
   });
 
-  it('CR self-heal is folded into the slot call as p_unlock (no separate eligibility write)', async () => {
+  it('p_unlock is always false — Code Review never unlocks the slot', async () => {
     const trello = new FakeTrello([
       card('A', 'list-todo'),
       card('X', 'list-cr', { idMembers: ['member-1'] }),
@@ -277,7 +274,7 @@ describe('claimCard', () => {
       userMemberId: 'member-1',
       date: TODAY,
       cardId: 'X',
-      claimCount: 1,
+      claimCount: 0,
       eligible: false,
       updatedAt: null,
     };
@@ -291,7 +288,7 @@ describe('claimCard', () => {
 
     const record = await claimCard('A', makeDeps(trello, store));
     expect(record.outcome).toBe('CLAIMED');
-    expect(unlockArg).toBe(true);
+    expect(unlockArg).toBe(false);
   });
 
   it('Trello POST failure → TRELLO_ERROR, slot released, retry can claim', async () => {
@@ -337,28 +334,37 @@ describe('isEligible', () => {
 
   it('first run (no state) is eligible', () => {
     const state = { userMemberId: 'member-1', date: null, cardId: null, claimCount: 0, eligible: true, updatedAt: null };
-    expect(isEligible(state, [], cfg, TODAY)).toBe(true);
+    expect(isEligible(state, cfg, TODAY)).toBe(true);
   });
 
-  it('new day resets eligibility', () => {
+  it('new day resets eligibility (the only reset)', () => {
     const state = { userMemberId: 'member-1', date: claimedDaysAgo(1), cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
-    expect(isEligible(state, [], cfg, TODAY)).toBe(true);
+    expect(isEligible(state, cfg, TODAY)).toBe(true);
   });
 
-  it('same day, claimed, no Code Review → not eligible', () => {
+  it('same day, claimed, at the limit → not eligible', () => {
     const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
-    expect(isEligible(state, [], cfg, TODAY)).toBe(false);
+    expect(isEligible(state, cfg, TODAY)).toBe(false);
   });
 
-  it('same day, claimed card in Code Review → eligible', () => {
+  it('same day, claimed card in Code Review → still NOT eligible (one per day)', () => {
     const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
-    const myCards = [{ id: 'X', idList: 'list-cr', idBoard: 'board-1', name: 'X' }];
-    expect(isEligible(state, myCards, cfg, TODAY)).toBe(true);
+    expect(isEligible(state, cfg, TODAY)).toBe(false);
   });
 
-  it('cards on other boards never count toward eligibility', () => {
-    const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
-    const myCards = [{ id: 'X', idList: 'list-cr', idBoard: 'other-board', name: 'X' }];
-    expect(isEligible(state, myCards, cfg, TODAY)).toBe(false);
+  it('eligible=true state does not unlock the same-day slot', () => {
+    const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: true, updatedAt: null };
+    expect(isEligible(state, cfg, TODAY)).toBe(false);
+  });
+
+  it('under the daily limit → eligible', () => {
+    const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 0, eligible: false, updatedAt: null };
+    expect(isEligible(state, cfg, TODAY)).toBe(true);
+  });
+
+  it('unlimited (DAILY_LIMIT=0) → always eligible', () => {
+    const cfg0 = makeConfig({ dailyLimit: 0 });
+    const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 9, eligible: false, updatedAt: null };
+    expect(isEligible(state, cfg0, TODAY)).toBe(true);
   });
 });

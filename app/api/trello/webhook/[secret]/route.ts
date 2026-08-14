@@ -100,11 +100,10 @@ export async function POST(
     }
 
     if (classification.kind === 'eligibility') {
-      // Code Review is an eligibility event only — it never assigns a card.
-      const updated = await getStore().setEligible(cfg.trelloMemberId, parsed.cardId!);
-      if (updated) {
-        log('ELIGIBILITY_UPDATED', { cardId: parsed.cardId, listId: parsed.listId });
-      }
+      // Code Review is an eligibility event only — it never assigns a card, and
+      // per the one-per-day rule it does NOT unlock the daily slot either.
+      // Only a new Lagos midnight resets eligibility. Acknowledge and log.
+      log('CODE_REVIEW_MOVE', { cardId: parsed.cardId, listId: parsed.listId });
       return new Response('OK', { status: 200 });
     }
 

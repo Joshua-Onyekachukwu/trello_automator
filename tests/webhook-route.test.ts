@@ -95,7 +95,7 @@ describe('webhook route', () => {
     expect(claimCard).not.toHaveBeenCalled();
   });
 
-  it('routes a Code Review move to the eligibility path (never claims)', async () => {
+  it('routes a Code Review move to the eligibility path (never claims, never unlocks)', async () => {
     const store = new FakeClaimStore();
     store.state = { userMemberId: 'member-1', date: '2026-08-14', cardId: 'cardA', claimCount: 1, eligible: false, updatedAt: null };
     vi.mocked(getStore).mockReturnValue(store);
@@ -103,7 +103,9 @@ describe('webhook route', () => {
     const res = await callPost(trelloPayload('updateCard', 'cardA', 'list-cr'));
     expect(res.status).toBe(200);
     expect(claimCard).not.toHaveBeenCalled();
-    expect(store.state.eligible).toBe(true);
+    // One card per day: the Code Review move must NOT touch claim state.
+    expect(store.state.eligible).toBe(false);
+    expect(store.state.claimCount).toBe(1);
   });
 
   it('ignores comments and renames', async () => {

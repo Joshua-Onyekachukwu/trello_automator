@@ -42,10 +42,11 @@ create table if not exists claim_events (
 create index if not exists claim_events_created_at_idx on claim_events (created_at desc);
 
 -- Atomic daily-slot claim. Returns won=true for exactly one of any set of
--- concurrent calls that the limit allows. p_unlock accepts a claim when the
--- Code-Review self-heal applies (state says ineligible but the claimed card
--- is in Code Review per live Trello) — folded into this same call so no
--- separate eligibility write is needed on the hot path.
+-- concurrent calls that the one-per-day rule allows: a new Lagos day (midnight
+-- is the ONLY reset), unlimited (p_limit = 0), or still under the daily limit.
+-- Code Review never unlocks the slot. p_unlock is retained in the signature
+-- for API compatibility (the app always sends false) but is NOT consulted —
+-- eligible is never used to grant a claim.
 create or replace function claim_slot(
   p_user text, p_date text, p_card text, p_limit integer, p_unlock boolean
 ) returns table (won boolean)
@@ -58,9 +59,7 @@ begin
         updated_at = now()
     where user_member_id = p_user
       and (
-        date <> p_date or        -- new Lagos day
-        eligible <> false or     -- unlocked by the Code Review webhook event
-        p_unlock or              -- Code Review self-heal derived from live Trello
+        date <> p_date or        -- new Lagos day (midnight is the only reset)
         p_limit = 0 or           -- unlimited
         claim_count < p_limit    -- still under the daily limit
       );

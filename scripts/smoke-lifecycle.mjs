@@ -1,23 +1,26 @@
 #!/usr/bin/env node
 /**
- * Live daily-guard + Code Review unlock lifecycle smoke test.
+ * Live one-card-per-day lifecycle smoke test.
  *
  *   npm run smoke [-- --url=<app-base-url>] [-- --timeout=60] [-- --keep-state]
  *
  * Drives the whole lifecycle against a real Trello board + the deployed/local
  * app, so it can be re-run after any change to prove nothing regressed:
  *
- *   0. Pre-flight: probes the installed claim_slot function for the
- *      Code-Review-unlocked claim contract (eligible <> false at the daily
- *      limit). Fails fast with a clear message if the function body is stale —
- *      no cards are touched until this passes.
+ *   0. Pre-flight: probes the installed claim_slot function for the one-per-day
+ *      contract — a same-day claim at the daily limit must be REFUSED (even
+ *      with eligible=true; Code Review never unlocks) and a yesterday-dated
+ *      slot must roll over (midnight is the only reset). Fails fast with a
+ *      clear message if the function body is stale — no cards are touched
+ *      until this passes.
  *   1. (Re)sets today's claim slot unless --keep-state.
- *   2. Card A enters To Do      → must be CLAIMED.
- *   3. Card A moves to Code Review → must unlock (eligible=true).
- *   4. Card B enters To Do (same Lagos day) → must be CLAIMED (the CR unlock
- *      + daily guard working together).
- *   5. Card C enters To Do      → informational: reports which guard stops it.
- *   6. Always archives every card it created, even on failure.
+ *   2. Card A enters To Do         → must be CLAIMED.
+ *   3. Card A moves to Code Review → must NOT unlock (eligible stays false).
+ *   4. Card B enters To Do (same Lagos day) → must be REFUSED (one per day).
+ *   5. Card C enters To Do         → informational: reports which guard stops it.
+ *   6. Simulated midnight (slot date rolled back a day) → Card D must be
+ *      CLAIMED with the count reset.
+ *   7. Always archives every card it created, even on failure.
  *
  * Modes:
  *   --url=<base>   delivers the webhook payloads itself (exactly what Trello
@@ -203,33 +206,53 @@ function timingOf(event) {
 }
 
 async function main() {
-  console.log('── Pre-flight: claim_slot contract ──────────────────────────────');
+  console.log('── Pre-flight: claim_slot one-per-day contract ─────────────────');
 
-  // The exact probe that caught the buggy function body: a row that is
-  // eligible=true at the daily limit must be accepted via eligible <> false.
+  // One card per Lagos day: a same-day claim at the daily limit must be
+  // REFUSED even when eligible=true (Code Review never unlocks the slot), and
+  // a yesterday-dated slot must roll over — midnight is the only reset.
   const today = lagosToday();
+  const yesterday = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Africa/Lagos',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(Date.now() - 86_400_000));
   const probeUser = `smoke-probe-${Date.now()}`;
   await supabase('/claim_state', {
     method: 'POST',
     prefer: 'resolution=ignore-duplicates',
     body: { user_member_id: probeUser, date: today, card_id: 'probe', eligible: true, claim_count: 2 },
   });
-  const rpc = await supabase('/rpc/claim_slot', {
+  // Probe 1: at the limit with eligible=true → must be REFUSED (no CR unlock).
+  const rpcAtLimit = await supabase('/rpc/claim_slot', {
+    method: 'POST',
+    prefer: 'return=representation',
+    body: { p_user: probeUser, p_date: today, p_card: 'probe-new', p_limit: 2, p_unlock: false },
+  });
+  const refusedAtLimit = Array.isArray(rpcAtLimit) && rpcAtLimit[0]?.won === false;
+  // Probe 2: roll the slot back a day → must be accepted (midnight reset).
+  await supabase(`/claim_state?user_member_id=eq.${encodeURIComponent(probeUser)}`, {
+    method: 'PATCH',
+    body: { date: yesterday },
+  });
+  const rpcNewDay = await supabase('/rpc/claim_slot', {
     method: 'POST',
     prefer: 'return=representation',
     body: { p_user: probeUser, p_date: today, p_card: 'probe-new', p_limit: 2, p_unlock: false },
   });
   await supabase(`/claim_state?user_member_id=eq.${encodeURIComponent(probeUser)}`, { method: 'DELETE' });
-  const probeWon = Array.isArray(rpc) && rpc[0]?.won === true;
-  if (!probeWon) {
+  const acceptedNewDay = Array.isArray(rpcNewDay) && rpcNewDay[0]?.won === true;
+  if (!refusedAtLimit || !acceptedNewDay) {
     console.error(
-      '❌ claim_slot rejected an eligible-at-limit claim — the installed function body is stale ' +
-        '(missing the `eligible <> false` condition). Re-run the `create or replace function claim_slot` ' +
-        'block from supabase/schema.sql, then re-run this smoke.',
+      '❌ claim_slot does not enforce the one-per-day contract ' +
+        `(refused-at-limit=${refusedAtLimit}, accepted-new-day=${acceptedNewDay}). ` +
+        'Expected: same-day claim at the limit refused even with eligible=true, and ' +
+        'a yesterday-dated slot accepted. Check the installed claim_slot function.',
     );
     return 2;
   }
-  console.log('✅ claim_slot accepts the Code-Review-unlocked claim (eligible <> false live)');
+  console.log('✅ claim_slot enforces one card per Lagos day (no Code Review unlock, midnight resets)');
 
   if (!keepState) {
     console.warn(
@@ -261,27 +284,29 @@ async function main() {
     steps.push(['A → To Do', 'CLAIMED', `${evA.processing_time_ms}ms${timingOf(evA)}`]);
     console.log(`  ✅ CLAIMED${timingOf(evA)}`);
 
-    console.log('\n── Step 2: move A to Code Review → should unlock (eligible=true) ──');
+    console.log('\n── Step 2: move A to Code Review → must NOT unlock the same-day slot ──');
     await moveCard(a.id, CODE_REVIEW_LIST_ID);
     await fire(a.id, 'updateCard', CODE_REVIEW_LIST_ID, [TRELLO_MEMBER_ID]);
-    const unlocked = await waitForState((s) => s.eligible === true, 'CR unlock');
-    if (!unlocked?.eligible) {
-      fail(`Code Review move did not unlock eligibility (state: ${JSON.stringify(unlocked)})`);
+    // One card per day: the CR move must leave the slot locked (eligible stays
+    // false, count unchanged) until the next Lagos midnight.
+    const afterCr = await waitForState((s) => s.claimCount === 1, 'CR move processed');
+    if (afterCr?.eligible !== false || afterCr.claimCount !== 1) {
+      fail(`Code Review move changed the slot — expected eligible=false, count=1 (state: ${JSON.stringify(afterCr)})`);
     }
-    steps.push(['A → Code Review', 'UNLOCKED', `eligible=true, count=${unlocked.claimCount}`]);
-    console.log(`  ✅ eligible=true (count stays ${unlocked.claimCount})`);
+    steps.push(['A → Code Review', 'NO UNLOCK', `eligible=false, count=${afterCr.claimCount}`]);
+    console.log(`  ✅ eligible stays false (count ${afterCr.claimCount}) — slot still locked`);
 
-    console.log('\n── Step 3: card B enters To Do (same Lagos day) → should be CLAIMED ──');
+    console.log('\n── Step 3: card B enters To Do (same Lagos day) → must be REFUSED (one per day) ──');
     const b = await createCard('Lifecycle-Smoke-B');
     created.push(b.id);
     console.log(`  card B ${b.id} — https://trello.com/c/${b.shortLink}`);
     await fire(b.id, 'createCard', TODO_LIST_ID, []);
-    const evB = await waitForEvent(b.id, (e) => e.event_type === 'CARD_CLAIMED' && e.success, 'claim B');
-    if (!evB || evB.event_type !== 'CARD_CLAIMED') {
-      fail(`card B was not claimed (last event: ${evB?.event_type ?? 'none'})`);
+    const evB = await waitForEvent(b.id, (e) => e.event_type === 'NOT_ELIGIBLE', 'guard B');
+    if (!evB || evB.event_type !== 'NOT_ELIGIBLE') {
+      fail(`card B should have been refused (last event: ${evB?.event_type ?? 'none'})`);
     }
-    steps.push(['B → To Do (same day)', 'CLAIMED', `${evB.processing_time_ms}ms${timingOf(evB)}`]);
-    console.log(`  ✅ CLAIMED${timingOf(evB)}`);
+    steps.push(['B → To Do (same day)', 'NOT_ELIGIBLE', `${evB.processing_time_ms}ms`]);
+    console.log(`  ✅ REFUSED — NOT_ELIGIBLE (the daily slot is one card)`);
 
     console.log('\n── Step 4 (informational): card C enters To Do ─────────────────');
     const c = await createCard('Lifecycle-Smoke-C');
@@ -292,6 +317,22 @@ async function main() {
     const outcomeC = evC?.event_type ?? 'none';
     steps.push(['C → To Do', outcomeC, evC?.processing_time_ms ? `${evC.processing_time_ms}ms` : 'no event']);
     console.log(`  ${outcomeC === 'CARD_CLAIMED' ? '⚠️' : '⛔ blocked'} — ${outcomeC}${timingOf(evC)} (expected: a guard stops it)`);
+
+    console.log('\n── Step 5: simulate midnight → card D enters To Do → should be CLAIMED ──');
+    await supabase(`/claim_state?user_member_id=eq.${encodeURIComponent(TRELLO_MEMBER_ID)}`, {
+      method: 'PATCH',
+      body: { date: yesterday },
+    });
+    const d = await createCard('Lifecycle-Smoke-D');
+    created.push(d.id);
+    console.log(`  card D ${d.id} — https://trello.com/c/${d.shortLink}`);
+    await fire(d.id, 'createCard', TODO_LIST_ID, []);
+    const evD = await waitForEvent(d.id, (e) => e.event_type === 'CARD_CLAIMED' && e.success, 'claim D');
+    if (!evD || evD.event_type !== 'CARD_CLAIMED') {
+      fail(`card D was not claimed after midnight (last event: ${evD?.event_type ?? 'none'})`);
+    }
+    steps.push(['D → To Do (new day)', 'CLAIMED', `${evD.processing_time_ms}ms${timingOf(evD)}`]);
+    console.log(`  ✅ CLAIMED${timingOf(evD)} — count reset, date rolled to today`);
 
     const state = await getState();
     console.log('\n── Summary ─────────────────────────────────────────────────────');

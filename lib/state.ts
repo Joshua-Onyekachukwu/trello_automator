@@ -13,12 +13,13 @@
  *       AND (date <> today OR p_unlock OR limit = 0 OR claim_count < limit)
  *   → if 0 rows and no row exists, INSERT ... ON CONFLICT DO NOTHING
  *
- * `p_unlock` folds the Code-Review self-heal into the same atomic call: when
- * live Trello shows the claimed card in Code Review, the claim is accepted
- * without a separate eligibility write. Exactly one of any set of simultaneous
- * claims that the limit allows wins (Postgres re-evaluates the WHERE clause on
- * the committed row), and the count can never exceed the limit. A failed
- * Trello assignment is undone with `release_slot`, which decrements the count.
+ * One card per Lagos day: the app never sets eligible=true and always passes
+ * p_unlock=false, so the SQL's unlock branches never fire — the effective rule
+ * is a fresh slot only at the next Lagos midnight. Exactly one of any set of
+ * simultaneous claims that the limit allows wins (Postgres re-evaluates the
+ * WHERE clause on the committed row), and the count can never exceed the limit.
+ * A failed Trello assignment is undone with `release_slot`, which decrements
+ * the count.
  */
 
 import { getConfig } from './config';

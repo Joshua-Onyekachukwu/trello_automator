@@ -39,9 +39,9 @@ The full design rationale is in [`docs/architecture.md`](docs/architecture.md).
 3. You are not already assigned to a To Do card.
 4. You are not already assigned to a Doing card.
 5. You are eligible — at most `DAILY_LIMIT` cards per **Africa/Lagos** day
-   (`1` by default, `2`, or `0` = unlimited), unless your claimed card has moved
-   into Code Review (which makes you eligible again, but never triggers an
-   assignment by itself).
+   (`1` by default, `2`, or `0` = unlimited). Moving your claimed card to Code
+   Review does **not** unlock the same-day slot; only a new Lagos midnight
+   resets eligibility. Code Review never triggers an assignment by itself.
 
 If all conditions pass, the assignment request is sent to Trello immediately.
 The state row is written only after Trello confirms the assignment.
@@ -290,8 +290,8 @@ webhook or already having an open card in To Do/Doing.
 
 ### Full lifecycle smoke (`npm run smoke`)
 
-Re-runnable proof of the daily guard + Code Review unlock working together,
-against any configured board:
+Re-runnable proof of the one-card-per-day lifecycle (daily guard, Code Review
+no-unlock, midnight reset) against any configured board:
 
 ```bash
 npm run smoke -- --url=http://localhost:3105   # local app, simulated webhooks
@@ -300,10 +300,10 @@ npm run smoke                                  # deployed app, real webhooks
 
 It pre-flights the installed `claim_slot` function (rejects a stale/buggy body
 before touching any card), resets today's claim slot (unless `--keep-state`),
-then drives: card A claimed → moved to Code Review (unlock) → card B claimed the
-same day → reports which guard stops a third card. Every card it creates is
-archived, even on failure. Exit codes: `0` = lifecycle passed, `1` = a step
-failed, `2` = setup/pre-flight failure.
+then drives: card A claimed → moved to Code Review (must **not** unlock) → card
+B refused the same day (one per day) → simulated midnight → card D claimed with
+the count reset. Every card it creates is archived, even on failure. Exit codes:
+`0` = lifecycle passed, `1` = a step failed, `2` = setup/pre-flight failure.
 
 ---
 

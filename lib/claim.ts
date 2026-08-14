@@ -8,12 +8,12 @@
  *   2. No one already assigned to the target card
  *   3. User is not already assigned to a To Do card
  *   4. User is not already assigned to a Doing card
- *   5. User is eligible (one card per Lagos day unless claimed card is in Code Review)
+ *   5. User is eligible (one card per Lagos day)
  *
- * Concurrency: conditions 1–5 are evaluated from the parallel read fan-out,
- * then the per-user daily slot is claimed with one atomic conditional UPDATE
- * before the assignment POST. Exactly one of any set of concurrent claims wins
- * the slot, so the user is never assigned two cards in one Lagos day.
+ * Daily rule: ONE claim per Lagos day. Moving the claimed card to Code Review
+ * never unlocks the same-day slot — only a new Lagos midnight resets it. The
+ * slot is claimed with one atomic conditional UPDATE (claim_slot) before the
+ * assignment POST, so exactly one of any set of concurrent claims wins.
  */
 
 import type { Config } from './config';
@@ -60,41 +60,23 @@ function payloadCardComplete(p: TargetCardInfo | null): p is TargetCardInfo & {
 }
 
 /**
- * Condition 5 — daily claim state.
+ * Condition 5 — daily claim state. ONE claim per Lagos day.
  *
- * Eligible when:
+ * Eligible only when:
  *   - it is a new Lagos day (or the user has never claimed), or
  *   - DAILY_LIMIT is 0 (unlimited), or
- *   - the number of cards claimed today is still under the daily limit, or
- *   - the claimed card has moved into Code Review (freshly derived from the
- *     user's live cards, so a missed webhook self-heals), or
- *   - the state already says eligible for today (Code Review unlock persisted).
+ *   - the number of cards claimed today is still under the daily limit.
  *
- * The limit is also enforced atomically by the database (claim_slot), so this
- * check is the fast path — a race can only make us stop, never exceed the limit.
+ * Code Review does NOT unlock the slot — the user's rule: after moving the
+ * claimed card to Code Review, the next chance to pick another card comes
+ * after the next Lagos midnight. The limit is also enforced atomically by the
+ * database (claim_slot), so this check is the fast path — a race can only
+ * make us stop, never exceed the limit.
  */
-export function isEligible(
-  state: ClaimState,
-  myBoardCards: TrelloMyCard[],
-  cfg: Config,
-  today: string,
-): boolean {
+export function isEligible(state: ClaimState, cfg: Config, today: string): boolean {
   if (state.date !== today) return true; // new Lagos day or first run
   if (cfg.dailyLimit === 0) return true; // unlimited
-  if (state.claimCount < cfg.dailyLimit) return true; // still within the daily limit
-  if (state.eligible) return true;
-  if (
-    state.cardId &&
-    myBoardCards.some(
-      (c) =>
-        c.id === state.cardId &&
-        c.idBoard === cfg.trelloBoardId &&
-        c.idList === cfg.codeReviewListId,
-    )
-  ) {
-    return true; // claimed card moved to Code Review
-  }
-  return false;
+  return state.claimCount < cfg.dailyLimit; // still within the daily limit
 }
 
 export async function claimCard(
@@ -151,28 +133,18 @@ export async function claimCard(
       return await finish(store, makeRecord(cardId, 'USER_ALREADY_IN_DOING', timing));
     }
 
-    // Condition 5 — daily claim state.
-    if (!isEligible(state, mine, config, today)) {
+    // Condition 5 — daily claim state. Code Review never unlocks the slot;
+    // only a new Lagos day resets it.
+    if (!isEligible(state, config, today)) {
       return await finish(store, makeRecord(cardId, 'NOT_ELIGIBLE', timing));
     }
 
-    // The Code Review unlock can be self-healed from live Trello data even if
-    // the CR webhook was missed. It is folded into the same atomic slot call as
-    // a p_unlock flag — one round trip, no separate eligibility write.
-    const crUnlock =
-      state.date === today &&
-      state.eligible === false &&
-      state.cardId !== null &&
-      mine.some(
-        (c) =>
-          c.id === state.cardId &&
-          c.idBoard === config.trelloBoardId &&
-          c.idList === config.codeReviewListId,
-      );
-
     // Atomically take today's slot (enforcing the daily limit in the database).
-    // A losing caller must stop immediately, before any Trello POST.
-    const slot = await store.tryClaim(memberId, today, cardId, config.dailyLimit, crUnlock);
+    // p_unlock is always false: Code Review does not unlock the same-day slot
+    // (the SQL keeps the parameter for compatibility; the app never triggers
+    // it, so the effective rule is one claim per Lagos day). A losing caller
+    // must stop immediately, before any Trello POST.
+    const slot = await store.tryClaim(memberId, today, cardId, config.dailyLimit, false);
     slotWon = slot.won;
     if (!slot.won) {
       return await finish(store, makeRecord(cardId, 'NOT_ELIGIBLE', timing, { raceLost: true }));
