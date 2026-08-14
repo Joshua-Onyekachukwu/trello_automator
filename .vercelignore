@@ -1,0 +1,9 @@
+# never upload local environment files or secrets
+.env*
+.env.local
+.env*.local
+
+# local tooling / build artifacts
+.freebuff/
+node_modules/
+.next/
