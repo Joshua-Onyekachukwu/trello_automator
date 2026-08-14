@@ -37,9 +37,10 @@ The full design rationale is in [`docs/architecture.md`](docs/architecture.md).
 2. No one is already assigned to the target card (`idMembers.length === 0`).
 3. You are not already assigned to a To Do card.
 4. You are not already assigned to a Doing card.
-5. You are eligible — one card per **Africa/Lagos** day, unless your claimed card
-   has moved into Code Review (which makes you eligible again, but never triggers
-   an assignment by itself).
+5. You are eligible — at most `DAILY_LIMIT` cards per **Africa/Lagos** day
+   (`1` by default, `2`, or `0` = unlimited), unless your claimed card has moved
+   into Code Review (which makes you eligible again, but never triggers an
+   assignment by itself).
 
 If all conditions pass, the assignment request is sent to Trello immediately.
 The state row is written only after Trello confirms the assignment.
@@ -115,6 +116,7 @@ CI runs typecheck + tests + build on every push (`.github/workflows/ci.yml`).
 | `TODO_LIST_ID`, `DOING_LIST_ID`, `CODE_REVIEW_LIST_ID` | The three lists that matter |
 | `SUPABASE_URL` | Supabase project URL |
 | `SUPABASE_SECRET_KEY` | Server-side SECRET key (Settings → API Keys); the only credential that can touch the tables |
+| `DAILY_LIMIT` | Max claims per Africa/Lagos day: `1` (default), `2`, `0` = unlimited |
 | `WEBHOOK_SECRET` | Long random string; webhook URL path secret + `x-admin-token` |
 | `APP_BASE_URL` | Public URL of the deployed app (used by `/api/trello/setup`) |
 
@@ -124,7 +126,9 @@ CI runs typecheck + tests + build on every push (`.github/workflows/ci.yml`).
 
 1. Create a project at https://supabase.com.
 2. Open **SQL Editor** and run the contents of [`supabase/schema.sql`](supabase/schema.sql)
-   (two tables: `claim_state`, `claim_events`; RLS is enabled with no policies).
+   — two tables (`claim_state`, `claim_events`), RLS enabled with no policies,
+   plus the `claim_slot` / `release_slot` functions that enforce the daily limit
+   atomically (the app calls them over the REST API).
 3. In **Project Settings → API Keys**, copy `SUPABASE_URL` (project URL) and the
    **SECRET key** (`sb_secret_...`) into the env vars. The secret key is the only
    credential the service uses — it bypasses RLS, and the publishable key gets
@@ -132,6 +136,20 @@ CI runs typecheck + tests + build on every push (`.github/workflows/ci.yml`).
 
 No connection string is needed — the app talks to the database through the
 Supabase REST API, which is also why there is no `DATABASE_URL` env var.
+
+### Daily claim limit (`DAILY_LIMIT`)
+
+The limit is enforced by the database (`claim_slot`), so it can never be
+exceeded even when several cards enter To Do at the same instant:
+
+- `DAILY_LIMIT=1` — one card per Lagos day (default).
+- `DAILY_LIMIT=2` — two cards per Lagos day.
+- `DAILY_LIMIT=0` — unlimited.
+
+The count resets at midnight Africa/Lagos (computed per event, no cron). Moving
+the claimed card to Code Review still makes you eligible again regardless of the
+limit. Change the env var in Vercel and redeploy (auto-deploys on push) to adjust
+the limit anytime.
 
 ---
 
@@ -295,6 +313,10 @@ No "within milliseconds" claims here: read the real numbers from the deployed
 service. The `tests/perf.test.ts` simulation shows the application's own overhead
 (in-memory, single-digit ms) and the parallel-read behavior under simulated
 network latency; real figures come from Vercel logs / `claim_events` after deploy.
+
+Measured in production on the test board (real Trello webhook → Vercel):
+**~870–1070 ms** from webhook receipt to successful assignment (parallel checks
+~350–530 ms, assignment POST ~170–180 ms).
 
 ---
 

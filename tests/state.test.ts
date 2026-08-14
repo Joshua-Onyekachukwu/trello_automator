@@ -1,13 +1,15 @@
 /**
- * Tests for the Supabase REST store — the layer that replaced the SQL driver.
+ * Tests for the Supabase REST store — the layer between the claim logic and
+ * Postgres.
  *
- * These pin down the exact HTTP contract the concurrency guarantee depends on:
- *   - tryClaim() uses one atomic conditional PATCH (the WHERE guard) or an
- *     INSERT with resolution=ignore-duplicates, never a read-then-write;
- *   - a losing claim (empty result / conflict) reports won:false;
- *   - releaseClaim() restores or deletes the slot;
- *   - missing tables fail loudly (fail-closed) instead of looking like a
- *     legitimate "already claimed" result.
+ * These pin down the HTTP contract the concurrency guarantee depends on:
+ *   - tryClaim() is ONE atomic call to the claim_slot RPC (the daily-limit
+ *     guard lives in SQL, so the count can never exceed the limit under
+ *     concurrency — the app never reads-then-writes);
+ *   - releaseClaim() calls release_slot (a SQL-side decrement);
+ *   - a losing claim reports won:false;
+ *   - missing tables/functions fail loudly (fail-closed) instead of looking
+ *     like a legitimate "already claimed" result.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -29,6 +31,7 @@ const cfg = {
   supabaseSecretKey: 'sb_secret_test_key',
   webhookSecret: 'ws',
   appBaseUrl: 'https://app.example.com',
+  dailyLimit: 1,
 };
 
 interface CapturedRequest {
@@ -66,14 +69,8 @@ const KNOWN_EMPTY: ClaimState = {
   userMemberId: 'm',
   date: null,
   cardId: null,
+  claimCount: 0,
   eligible: true,
-  updatedAt: null,
-};
-const KNOWN_ROW: ClaimState = {
-  userMemberId: 'm',
-  date: '2026-08-13',
-  cardId: 'X',
-  eligible: false,
   updatedAt: null,
 };
 
@@ -92,105 +89,67 @@ describe('getState', () => {
     expect(state).toEqual(KNOWN_EMPTY);
   });
 
-  it('normalizes a stored row', async () => {
+  it('normalizes a stored row including the daily claim count', async () => {
     stubFetch(() => ({
-      body: [{ date: '2026-08-14', card_id: 'A', eligible: false, updated_at: '2026-08-14T10:00:00Z' }],
+      body: [
+        {
+          date: '2026-08-14',
+          card_id: 'A',
+          claim_count: 2,
+          eligible: false,
+          updated_at: '2026-08-14T10:00:00Z',
+        },
+      ],
     }));
     const state = await createStore().getState('m');
     expect(state.date).toBe('2026-08-14');
     expect(state.cardId).toBe('A');
+    expect(state.claimCount).toBe(2);
     expect(state.eligible).toBe(false);
     expect(state.updatedAt).toBe('2026-08-14T10:00:00.000Z');
   });
 });
 
-describe('tryClaim', () => {
-  it('claims a fresh day via INSERT with ignore-duplicates', async () => {
-    const calls = stubFetch(() => ({
-      status: 201,
-      body: [{ user_member_id: 'm', date: '2026-08-14', card_id: 'A', eligible: false }],
-    }));
-    const result = await createStore().tryClaim('m', '2026-08-14', 'A', KNOWN_EMPTY);
+describe('tryClaim (claim_slot RPC)', () => {
+  it('calls the atomic claim_slot function with the daily limit', async () => {
+    const calls = stubFetch(() => ({ body: [{ won: true }] }));
+    const result = await createStore().tryClaim('m', '2026-08-14', 'A', 2);
 
-    expect(result).toEqual({ won: true, previous: null });
+    expect(result).toEqual({ won: true });
     expect(calls).toHaveLength(1);
     expect(calls[0].method).toBe('POST');
-    expect(calls[0].url).toContain('/claim_state');
-    expect(calls[0].headers['Prefer']).toContain('resolution=ignore-duplicates');
-    expect(calls[0].headers['Prefer']).toContain('return=representation');
+    expect(calls[0].url).toContain('/rpc/claim_slot');
     expect(calls[0].headers['apikey']).toBe('sb_secret_test_key');
     expect(calls[0].headers['Authorization']).toBe('Bearer sb_secret_test_key');
     expect(calls[0].body).toEqual({
-      user_member_id: 'm',
-      date: '2026-08-14',
-      card_id: 'A',
-      eligible: false,
+      p_user: 'm',
+      p_date: '2026-08-14',
+      p_card: 'A',
+      p_limit: 2,
     });
   });
 
-  it('loses the insert race when a row already exists (conflict → empty result)', async () => {
-    stubFetch(() => ({ status: 201, body: [] }));
-    const result = await createStore().tryClaim('m', '2026-08-14', 'A', KNOWN_EMPTY);
+  it('reports won:false when the database rejects the claim', async () => {
+    stubFetch(() => ({ body: [{ won: false }] }));
+    const result = await createStore().tryClaim('m', '2026-08-14', 'A', 1);
     expect(result.won).toBe(false);
   });
 
-  it('claims an existing row with the atomic PATCH guard', async () => {
-    const calls = stubFetch(() => ({
-      body: [{ user_member_id: 'm', date: '2026-08-14', card_id: 'A', eligible: false }],
-    }));
-    const result = await createStore().tryClaim('m', '2026-08-14', 'A', KNOWN_ROW);
-
-    expect(result).toEqual({ won: true, previous: KNOWN_ROW });
-    expect(calls).toHaveLength(1);
-    expect(calls[0].method).toBe('PATCH');
-    expect(decodeURIComponent(calls[0].url)).toContain(
-      'or=(date.neq.2026-08-14,eligible.neq.false)',
-    );
-    expect(calls[0].url).toContain('user_member_id=eq.m');
-    expect(calls[0].body).toMatchObject({ date: '2026-08-14', card_id: 'A', eligible: false });
-  });
-
-  it('loses when the PATCH guard matches nothing and the INSERT conflicts', async () => {
-    let patch = true;
-    stubFetch(() => {
-      if (patch) {
-        patch = false;
-        return { body: [] }; // guard failed — another claim took today
-      }
-      return { status: 201, body: [] }; // INSERT conflict
-    });
-    const result = await createStore().tryClaim('m', '2026-08-14', 'A', KNOWN_ROW);
-    expect(result.won).toBe(false);
-  });
-
-  it('wins via INSERT when the PATCH matched nothing because the row was released', async () => {
-    let patch = true;
-    stubFetch(() => {
-      if (patch) {
-        patch = false;
-        return { body: [] }; // row vanished (a failed claim released it)
-      }
-      return { status: 201, body: [{ date: '2026-08-14', card_id: 'A', eligible: false }] };
-    });
-    const result = await createStore().tryClaim('m', '2026-08-14', 'A', KNOWN_ROW);
-    expect(result).toEqual({ won: true, previous: null });
+  it('passes dailyLimit 0 for unlimited', async () => {
+    const calls = stubFetch(() => ({ body: [{ won: true }] }));
+    await createStore().tryClaim('m', '2026-08-14', 'A', 0);
+    expect(calls[0].body).toEqual({ p_user: 'm', p_date: '2026-08-14', p_card: 'A', p_limit: 0 });
   });
 });
 
-describe('releaseClaim', () => {
-  it('deletes the row when there was no prior state', async () => {
+describe('releaseClaim (release_slot RPC)', () => {
+  it('decrements today\'s count via the release_slot function', async () => {
     const calls = stubFetch(() => ({ status: 204 }));
-    await createStore().releaseClaim('m', null);
+    await createStore().releaseClaim('m');
     expect(calls).toHaveLength(1);
-    expect(calls[0].method).toBe('DELETE');
-    expect(calls[0].url).toContain('user_member_id=eq.m');
-  });
-
-  it('restores the previous state when there was a prior row', async () => {
-    const calls = stubFetch(() => ({ body: [] }));
-    await createStore().releaseClaim('m', KNOWN_ROW);
-    expect(calls[0].method).toBe('PATCH');
-    expect(calls[0].body).toMatchObject({ date: '2026-08-13', card_id: 'X', eligible: false });
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].url).toContain('/rpc/release_slot');
+    expect(calls[0].body).toEqual({ p_user: 'm' });
   });
 });
 
@@ -275,6 +234,14 @@ describe('failure modes (fail-closed)', () => {
       }) as unknown as typeof fetch,
     );
     await expect(createStore().getState('m')).rejects.toThrow(/Supabase GET \/claim_state failed/);
+  });
+
+  it('throws when the claim_slot function does not exist (migration not run) instead of pretending we lost the race', async () => {
+    stubFetch(() => ({
+      status: 404,
+      body: { code: 'PGRST202', message: "Could not find the function public.claim_slot" },
+    }));
+    await expect(createStore().tryClaim('m', '2026-08-14', 'A', 1)).rejects.toThrow(/HTTP 404/);
   });
 
   it('throws when the table does not exist (PGRST205) instead of pretending we lost the race', async () => {

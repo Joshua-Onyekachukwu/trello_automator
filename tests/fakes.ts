@@ -28,6 +28,7 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
     supabaseSecretKey: 'sb_secret_test',
     webhookSecret: 'test-secret',
     appBaseUrl: 'https://example.com',
+    dailyLimit: 1,
     ...overrides,
   };
 }
@@ -105,6 +106,7 @@ export class FakeClaimStore implements ClaimStore {
     userMemberId: 'member-1',
     date: null,
     cardId: null,
+    claimCount: 0,
     eligible: true,
     updatedAt: null,
   };
@@ -124,31 +126,39 @@ export class FakeClaimStore implements ClaimStore {
     return { ...this.state, userMemberId: memberId };
   }
 
-  tryClaim(memberId: string, date: string, cardId: string, known: ClaimState): Promise<SlotResult> {
+  tryClaim(memberId: string, date: string, cardId: string, dailyLimit: number): Promise<SlotResult> {
     return this.serial(async () => {
       const s = this.state;
-      // Mirrors the real guard: the slot is free when there is no row, the row
-      // is from another day, or the row is Code-Review-unlocked (eligible=true).
-      const slotFree = s.cardId === null || s.date !== date || s.eligible === true;
-      if (!slotFree) return { won: false, previous: known };
-      const previous = known.date === null && known.cardId === null ? null : { ...known };
+      // Mirrors claim_slot: free when there is no row, another day, unlimited,
+      // still under the daily limit, or Code-Review-unlocked (eligible=true).
+      const slotFree =
+        s.cardId === null ||
+        s.date !== date ||
+        dailyLimit === 0 ||
+        s.claimCount < dailyLimit ||
+        s.eligible === true;
+      if (!slotFree) return { won: false };
       this.state = {
+        ...s,
         userMemberId: memberId,
         date,
         cardId,
         eligible: false,
+        claimCount: s.date === date ? s.claimCount + 1 : 1,
         updatedAt: new Date().toISOString(),
       };
-      return { won: true, previous };
+      return { won: true };
     });
   }
 
-  releaseClaim(memberId: string, previous: ClaimState | null): Promise<void> {
+  releaseClaim(memberId: string): Promise<void> {
     return this.serial(async () => {
-      this.state =
-        previous === null
-          ? { userMemberId: memberId, date: null, cardId: null, eligible: true, updatedAt: null }
-          : { ...previous, updatedAt: new Date().toISOString() };
+      this.state = {
+        ...this.state,
+        userMemberId: memberId,
+        claimCount: Math.max(this.state.claimCount - 1, 0),
+        updatedAt: new Date().toISOString(),
+      };
     });
   }
 

@@ -37,9 +37,14 @@ export interface ClaimDeps {
  *
  * Eligible when:
  *   - it is a new Lagos day (or the user has never claimed), or
+ *   - DAILY_LIMIT is 0 (unlimited), or
+ *   - the number of cards claimed today is still under the daily limit, or
  *   - the claimed card has moved into Code Review (freshly derived from the
  *     user's live cards, so a missed webhook self-heals), or
- *   - the state already says eligible for today.
+ *   - the state already says eligible for today (Code Review unlock persisted).
+ *
+ * The limit is also enforced atomically by the database (claim_slot), so this
+ * check is the fast path — a race can only make us stop, never exceed the limit.
  */
 export function isEligible(
   state: ClaimState,
@@ -48,6 +53,8 @@ export function isEligible(
   today: string,
 ): boolean {
   if (state.date !== today) return true; // new Lagos day or first run
+  if (cfg.dailyLimit === 0) return true; // unlimited
+  if (state.claimCount < cfg.dailyLimit) return true; // still within the daily limit
   if (state.eligible) return true;
   if (
     state.cardId &&
@@ -67,7 +74,7 @@ export async function claimCard(cardId: string, deps: ClaimDeps): Promise<ClaimR
   const { config, trello, store, timing } = deps;
   const memberId = config.trelloMemberId;
 
-  let slot: { won: boolean; previous: ClaimState | null } | null = null;
+  let slotWon = false;
 
   try {
     // The state read joins the two independent Trello reads in one parallel
@@ -113,9 +120,10 @@ export async function claimCard(cardId: string, deps: ClaimDeps): Promise<ClaimR
       await store.setEligible(memberId, state.cardId);
     }
 
-    // Atomically take today's slot. Only one concurrent claim wins — a losing
-    // caller must stop immediately, before any Trello POST.
-    slot = await store.tryClaim(memberId, today, cardId, state);
+    // Atomically take today's slot (enforcing the daily limit in the database).
+    // A losing caller must stop immediately, before any Trello POST.
+    const slot = await store.tryClaim(memberId, today, cardId, config.dailyLimit);
+    slotWon = slot.won;
     if (!slot.won) {
       return await finish(store, makeRecord(cardId, 'NOT_ELIGIBLE', timing, { raceLost: true }));
     }
@@ -133,13 +141,13 @@ export async function claimCard(cardId: string, deps: ClaimDeps): Promise<ClaimR
     const error = sanitizeError(err);
     // If we held the slot but the assignment (or anything after) failed, undo
     // it so the day is not burned — a redelivered webhook can then retry.
-    if (slot?.won) {
+    if (slotWon) {
       try {
-        await store.releaseClaim(memberId, slot.previous);
+        await store.releaseClaim(memberId);
       } catch (dbErr) {
         logError('DB_WRITE_FAILED', { cardId, error: sanitizeError(dbErr) });
       }
-      slot = null;
+      slotWon = false;
     }
     const outcome: ClaimOutcome = err instanceof TrelloApiError ? 'TRELLO_ERROR' : 'INTERNAL_ERROR';
     logError(outcome, { cardId, error });

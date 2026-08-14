@@ -17,6 +17,8 @@ export interface Config {
   supabaseSecretKey: string;
   webhookSecret: string;
   appBaseUrl: string;
+  /** Max claims per Lagos day. 0 = unlimited. */
+  dailyLimit: number;
 }
 
 const REQUIRED = [
@@ -53,5 +55,16 @@ export function getConfig(env: Record<string, string | undefined> = process.env)
     supabaseSecretKey: env.SUPABASE_SECRET_KEY!,
     webhookSecret: env.WEBHOOK_SECRET!,
     appBaseUrl: (env.APP_BASE_URL ?? '').replace(/\/+$/, ''),
+    dailyLimit: parseDailyLimit(env.DAILY_LIMIT),
   };
+}
+
+/** DAILY_LIMIT: positive integer, or 0 for unlimited. Defaults to 1 (current behavior). */
+function parseDailyLimit(raw: string | undefined): number {
+  if (!raw?.trim()) return 1;
+  const value = Number.parseInt(raw.trim(), 10);
+  if (Number.isNaN(value) || value < 0) {
+    throw new Error(`Invalid DAILY_LIMIT: "${raw}" — use 0 (unlimited) or a positive integer.`);
+  }
+  return value;
 }

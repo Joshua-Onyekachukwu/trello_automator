@@ -85,7 +85,7 @@ describe('claimCard', () => {
   it('Test 5 — user not eligible (already claimed today, card not in Code Review) → DON\'T CLAIM', async () => {
     const trello = new FakeTrello([card('A', 'list-todo')]);
     const store = new FakeClaimStore();
-    store.state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', eligible: false, updatedAt: null };
+    store.state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
     const record = await claimCard('A', makeDeps(trello, store));
 
     expect(record.outcome).toBe('NOT_ELIGIBLE');
@@ -99,7 +99,7 @@ describe('claimCard', () => {
       card('X', 'list-cr', { idMembers: ['member-1'] }),
     ]);
     const store = new FakeClaimStore();
-    store.state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', eligible: false, updatedAt: null };
+    store.state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
 
     // Code Review is an eligibility event only — it never assigns a card itself.
     const updated = await store.setEligible('member-1', 'X');
@@ -118,7 +118,7 @@ describe('claimCard', () => {
       card('X', 'list-cr', { idMembers: ['member-1'] }),
     ]);
     const store = new FakeClaimStore();
-    store.state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', eligible: false, updatedAt: null };
+    store.state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
 
     // No setEligible call — claimCard must still notice X is in Code Review.
     const record = await claimCard('A', makeDeps(trello, store));
@@ -132,6 +132,7 @@ describe('claimCard', () => {
       userMemberId: 'member-1',
       date: claimedDaysAgo(1),
       cardId: 'X',
+      claimCount: 1,
       eligible: false,
       updatedAt: null,
     };
@@ -183,6 +184,66 @@ describe('claimCard', () => {
     expect(store.records.filter((r) => r.eventType === 'CARD_CLAIMED')).toHaveLength(1);
   });
 
+  it('Test 10b — daily limit 2: two claims per day, a third is refused', async () => {
+    const cfg = makeConfig({ dailyLimit: 2 });
+    const trello = new FakeTrello([card('A', 'list-todo'), card('B', 'list-todo'), card('C', 'list-todo')]);
+    const store = new FakeClaimStore();
+    const deps = { config: cfg, trello, store, timing: new Timing() };
+
+    // Real workflow: claim A, work it to Code Review → eligible again → claim B.
+    const ra = await claimCard('A', deps);
+    expect(ra.outcome).toBe('CLAIMED');
+    trello.cards.get('A')!.idList = 'list-cr';
+
+    const rb = await claimCard('B', deps);
+    expect(rb.outcome).toBe('CLAIMED');
+    expect(store.state.claimCount).toBe(2);
+
+    // B finishes (moved past review): now 2 claims are used, nothing is in
+    // To Do/Doing, and nothing is in Code Review to unlock → the count ceiling
+    // binds: a third claim is refused.
+    trello.cards.get('B')!.idList = 'list-done';
+    const rc = await claimCard('C', deps);
+    expect(rc.outcome).toBe('NOT_ELIGIBLE');
+    expect(trello.addMemberCalls).toHaveLength(2);
+    expect(store.state.claimCount).toBe(2);
+  });
+
+  it('Test 10c — unlimited (DAILY_LIMIT=0): all cards are claimed', async () => {
+    const cfg = makeConfig({ dailyLimit: 0 });
+    const trello = new FakeTrello([card('A', 'list-todo'), card('B', 'list-todo'), card('C', 'list-todo')]);
+    const store = new FakeClaimStore();
+    const deps = { config: cfg, trello, store, timing: new Timing() };
+
+    const [ra, rb, rc] = await Promise.all([
+      claimCard('A', deps),
+      claimCard('B', deps),
+      claimCard('C', deps),
+    ]);
+    expect([ra.outcome, rb.outcome, rc.outcome].filter((o) => o === 'CLAIMED')).toHaveLength(3);
+    expect(trello.addMemberCalls).toHaveLength(3);
+    expect(store.state.claimCount).toBe(3);
+  });
+
+  it('Trello POST failure → TRELLO_ERROR, slot released, retry can claim', async () => {
+    class PostDownTrello extends FakeTrello {
+      override async addMemberToCard(): Promise<void> {
+        throw new TrelloApiError(500, 'server error');
+      }
+    }
+    const trello = new PostDownTrello([card('A', 'list-todo')]);
+    const store = new FakeClaimStore();
+    const record = await claimCard('A', makeDeps(trello, store));
+
+    expect(record.outcome).toBe('TRELLO_ERROR');
+    expect(store.state.claimCount).toBe(0); // the failed claim was released
+
+    // The day is not burned: a retry (or a different card) can still claim.
+    const retry = await claimCard('A', makeDeps(new FakeTrello([card('A', 'list-todo')]), store));
+    expect(retry.outcome).toBe('CLAIMED');
+    expect(store.state.claimCount).toBe(1);
+  });
+
   it('Trello API failure during checks → TRELLO_ERROR, no claim, lock released', async () => {
     class NetworkDownTrello extends FakeTrello {
       override async getCard(): Promise<TrelloCard> {
@@ -206,28 +267,28 @@ describe('isEligible', () => {
   const cfg = makeConfig();
 
   it('first run (no state) is eligible', () => {
-    const state = { userMemberId: 'member-1', date: null, cardId: null, eligible: true, updatedAt: null };
+    const state = { userMemberId: 'member-1', date: null, cardId: null, claimCount: 0, eligible: true, updatedAt: null };
     expect(isEligible(state, [], cfg, TODAY)).toBe(true);
   });
 
   it('new day resets eligibility', () => {
-    const state = { userMemberId: 'member-1', date: claimedDaysAgo(1), cardId: 'X', eligible: false, updatedAt: null };
+    const state = { userMemberId: 'member-1', date: claimedDaysAgo(1), cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
     expect(isEligible(state, [], cfg, TODAY)).toBe(true);
   });
 
   it('same day, claimed, no Code Review → not eligible', () => {
-    const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', eligible: false, updatedAt: null };
+    const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
     expect(isEligible(state, [], cfg, TODAY)).toBe(false);
   });
 
   it('same day, claimed card in Code Review → eligible', () => {
-    const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', eligible: false, updatedAt: null };
+    const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
     const myCards = [{ id: 'X', idList: 'list-cr', idBoard: 'board-1', name: 'X' }];
     expect(isEligible(state, myCards, cfg, TODAY)).toBe(true);
   });
 
   it('cards on other boards never count toward eligibility', () => {
-    const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', eligible: false, updatedAt: null };
+    const state = { userMemberId: 'member-1', date: TODAY, cardId: 'X', claimCount: 1, eligible: false, updatedAt: null };
     const myCards = [{ id: 'X', idList: 'list-cr', idBoard: 'other-board', name: 'X' }];
     expect(isEligible(state, myCards, cfg, TODAY)).toBe(false);
   });

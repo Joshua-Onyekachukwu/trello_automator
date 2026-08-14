@@ -50,6 +50,7 @@ export async function GET(req: NextRequest): Promise<Response> {
         todoListId: cfg.todoListId,
         doingListId: cfg.doingListId,
         codeReviewListId: cfg.codeReviewListId,
+        dailyLimit: cfg.dailyLimit,
       },
       state,
       lastEvent,
