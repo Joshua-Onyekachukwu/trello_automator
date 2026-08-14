@@ -13,6 +13,8 @@ out/
 # logs / misc
 *.log
 .DS_Store
+
+# vercel CLI link metadata
 .vercel
 
 # local tooling (desktop app internal data)
