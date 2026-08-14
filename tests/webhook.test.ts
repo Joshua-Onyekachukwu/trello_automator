@@ -18,6 +18,7 @@ interface ActionOpts {
   listId?: string;
   listBeforeId?: string;
   boardId?: string;
+  closed?: boolean;
 }
 
 function payload(opts: ActionOpts = {}): Record<string, unknown> {
@@ -27,7 +28,7 @@ function payload(opts: ActionOpts = {}): Record<string, unknown> {
     data.listAfter = { id: opts.listId };
   }
   if (opts.listBeforeId) data.listBefore = { id: opts.listBeforeId };
-  if (opts.cardId) data.card = { id: opts.cardId, idList: opts.listId ?? null };
+  if (opts.cardId) data.card = { id: opts.cardId, idList: opts.listId ?? null, closed: opts.closed };
   if (opts.boardId) data.board = { id: opts.boardId };
   return {
     action: { type: opts.type ?? 'updateCard', data },
@@ -48,6 +49,7 @@ describe('parseWebhookPayload', () => {
       boardId: 'board-1',
       listId: 'list-todo',
       listBeforeId: 'list-backlog',
+      closed: undefined,
     });
   });
 
@@ -105,6 +107,10 @@ describe('classifyEvent — ignored', () => {
 
   it('reorder within To Do (listBefore === listAfter) → ignore', () => {
     expect(classify({ type: 'updateCard', cardId: 'A', listId: 'list-todo', listBeforeId: 'list-todo' })).toEqual({ kind: 'ignore', reason: 'reorder-in-list' });
+  });
+
+  it('archiving a card in To Do → ignore (never re-enters the claim path)', () => {
+    expect(classify({ type: 'updateCard', cardId: 'A', listId: 'list-todo', closed: true })).toEqual({ kind: 'ignore', reason: 'card-archived' });
   });
 
   it('card created in another list → ignore', () => {

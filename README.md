@@ -245,6 +245,28 @@ curl -X POST https://<your-domain>/api/trello/setup \
   -d '{"action":"create"}'
 ```
 
+## Safely testing the claim (throwaway card)
+
+`npm run test-claim` proves the full pipeline without touching real work:
+
+1. creates a throwaway card in the configured To Do list,
+2. lets the service claim it — with `--url=<base>` it delivers the webhook
+   payload itself (exactly what Trello would send, so it works against a local
+   server too); without it, it waits for the real registered webhook,
+3. reports the outcome and the timing recorded in `claim_events`,
+4. **always archives the card afterwards** (a closed card never re-enters the
+   claim path).
+
+```bash
+npm run test-claim -- --url=http://localhost:3105   # against a local app
+npm run test-claim                                  # against the deployed app (real webhook)
+```
+
+Exit code: `0` = claimed, `1` = not claimed (reason printed — e.g.
+`NOT_ELIGIBLE`, `USER_ALREADY_IN_TODO`), `2` = setup error. If it reports
+`NOT CLAIMED`, check `/api/trello/status`; the common causes are an unregistered
+webhook or already having an open card in To Do/Doing.
+
 ---
 
 ## Measuring performance

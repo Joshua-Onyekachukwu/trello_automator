@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "secret": "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"",
-    "board": "node --env-file-if-exists=.env.local scripts/resolve-board.mjs"
+    "board": "node --env-file-if-exists=.env.local scripts/resolve-board.mjs",
+    "test-claim": "node --env-file-if-exists=.env.local scripts/test-claim.mjs"
   },
   "dependencies": {
     "next": "^15.3.4",

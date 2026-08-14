@@ -15,6 +15,8 @@ export interface ParsedWebhook {
   /** The list the card is currently in: listAfter → data.list → card.idList. */
   listId: string | undefined;
   listBeforeId: string | undefined;
+  /** Archive/close flag — an archived card is not a list move. */
+  closed: boolean | undefined;
 }
 
 export type EventKind = 'claim' | 'eligibility' | 'ignore';
@@ -56,6 +58,7 @@ export function parseWebhookPayload(payload: unknown): ParsedWebhook | null {
           : undefined,
     listId: firstString(listAfter?.id, createdInList?.id, card?.idList),
     listBeforeId: typeof listBefore?.id === 'string' ? listBefore.id : undefined,
+    closed: typeof card?.closed === 'boolean' ? card.closed : undefined,
   };
 }
 
@@ -87,6 +90,10 @@ export function classifyEvent(parsed: ParsedWebhook, cfg: Config): EventClassifi
   }
 
   if (parsed.actionType === 'updateCard') {
+    // Archiving a card (closed = true) is not a list move — the card still
+    // reports its old list, so without this check an archived To Do card would
+    // re-enter the claim path (and could be claimed while archived).
+    if (parsed.closed === true) return { kind: 'ignore', reason: 'card-archived' };
     // Reorder within the same list carries listBefore === listAfter.
     if (parsed.listId && parsed.listBeforeId === parsed.listId) {
       return { kind: 'ignore', reason: 'reorder-in-list' };
