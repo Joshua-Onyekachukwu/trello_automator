@@ -147,33 +147,39 @@ guard** (no advisory lock, no extra infrastructure):
 ```
 T1: card A → TODO              T2: card B → TODO (near-simultaneous)
 ─────────────────────          ─────────────────────
-parallel reads (card A,        parallel reads (card B,
-  my cards, state)               my cards, state)
+parallel reads (my cards,      parallel reads (my cards,
+  state; card from payload)      state; card from payload)
 evaluate: all 5 conditions      evaluate: all 5 conditions
-UPDATE claim_state              UPDATE claim_state
-  SET date=today, card_id=A       SET date=today, card_id=B
-  WHERE user_member_id=$me        WHERE user_member_id=$me
-    AND (date <> today            AND (date <> today
-         OR eligible <> false)         OR eligible <> false)
-  → 1 row: T1 WINS              → blocked by Postgres row lock; after T1
-                                  commits the WHERE is re-evaluated on the
-                                  committed row (date=today, eligible=false)
-                                  → 0 rows: T2 LOSES, no POST
+SELECT claim_slot(A)            SELECT claim_slot(B)   — one atomic Postgres call
+  (UPDATE claim_state             (UPDATE claim_state
+     SET date=today, card_id=A      SET date=today, card_id=B
+     WHERE user_member_id=$me       WHERE user_member_id=$me
+       AND (date <> today           AND (date <> today
+            OR p_unlock                  OR p_unlock
+            OR limit = 0                OR limit = 0
+            OR claim_count < limit)     OR claim_count < limit)
+     → 1 row: T1 WINS             → blocked by Postgres row lock; after T1
+                                   commits the WHERE is re-evaluated on the
+                                   committed row (date=today, eligible=false,
+                                   claim_count = limit)
+                                   → 0 rows: T2 LOSES, no POST
 ```
 
-Fresh-day / first-run claims use `INSERT ... ON CONFLICT DO NOTHING` (via
-`Prefer: resolution=ignore-duplicates`), which is equally atomic: the loser's
-insert conflicts and wins nothing.
+Fresh-day / first-run claims fall through to `INSERT ... ON CONFLICT DO NOTHING`
+inside the same function, which is equally atomic: the loser's insert conflicts
+and wins nothing.
 
 Key properties:
-- **Eligibility is evaluated from the parallel read fan-out** (`getCard`,
-  `getMyCards`, `getState` in one `Promise.all`), then the slot is claimed with
-  **one write**. The guard's WHERE clause is exactly "the day's slot is free":
-  no row yet, a row from an earlier day, or a row unlocked by Code Review.
-- **The Code Review unlock is persisted before the slot claim.** Because the guard
-  only knows stored state, `claimCard` first writes `eligible = true` when it
-  self-heals the CR state from live Trello data; then the guard passes for the
-  next claim. Exactly one of any set of concurrent claims still wins.
+- **Eligibility is evaluated from the parallel read fan-out** (`getMyCards` +
+  `getState` in one `Promise.all`; the target card comes from the webhook payload
+  itself when it carries `idList` + `idMembers`, with a `getCard` fallback), then
+  the slot is claimed with **one atomic RPC call** (`claim_slot`). The guard's
+  WHERE clause is exactly "the day's slot is free": no row yet, a row from an
+  earlier day, still under the daily limit, or unlocked by Code Review.
+- **The Code Review self-heal is folded into the slot call** as a `p_unlock`
+  flag: when live Trello shows the claimed card in Code Review, the claim is
+  accepted in the same atomic UPDATE — no separate eligibility write, one round
+  trip instead of two.
 - **The slot is taken only immediately before the Trello POST**, and released
   again (`DELETE` row, or restore of the prior values) if the POST fails. Trello's
   response is authoritative — a redelivered webhook can retry after a release.
@@ -197,18 +203,20 @@ member, and/or (b) the daily slot guard fails.
 Target flow per event:
 
 ```
-receive webhook  →  classify (pure, ~0 ms)  →  parallel reads  →  decision  →  slot guard  →  POST  →  log
+receive webhook  →  classify (pure, ~0 ms)  →  parallel reads  →  decision  →  slot RPC  →  POST  →  log
                       │
-                      ├── GET /1/cards/{id}?fields=idList,idMembers,idBoard
+                      ├── target card from the webhook payload
+                      │     (idList + idMembers; GET /1/cards/{id} only as fallback)
                       ├── GET /1/members/{me}/cards?fields=idList,idBoard&filter=open   ┐
                       └── GET claim_state (Supabase REST)                                ├─ Promise.all
                                                                                         ┘
 ```
 
-- **One request answers multiple conditions:** `getCard` answers conditions 1 + 2;
-  `getMyCards` answers conditions 3 + 4 (+ the Code Review eligibility check);
-  `getState` joins the same fan-out at zero extra latency. Then at most **one** slot
-  write and **one** Trello POST. No other network calls exist.
+- **One request answers multiple conditions:** the webhook payload's card data
+  answers conditions 1 + 2 (with `getCard` as a fallback when `idMembers` is
+  absent); `getMyCards` answers conditions 3 + 4 (+ the Code Review eligibility
+  check); `getState` joins the same fan-out at zero extra latency. Then at most
+  **one** slot RPC and **one** Trello POST. No other network calls exist.
 - **No polling, no queue, no cron, no artificial delay.** Midnight reset is computed
   (`Intl.DateTimeFormat` with `timeZone: 'Africa/Lagos'`), not scheduled.
 - **DB writes minimized:** one slot write per successful claim, one event-log write
