@@ -20,7 +20,10 @@ import { Timing } from '@/lib/timing';
 import { createTrelloClient } from '@/lib/trello';
 import { classifyEvent, parseWebhookPayload } from '@/lib/webhook';
 
-export const runtime = 'nodejs';
+// Edge runtime: near-zero cold start. The claim path is first-come-first-served,
+// so a cold start (300-900ms on Node) can lose the race to a teammate on the
+// first card of the day. All hot-path code is pure fetch/JSON — Edge-safe.
+export const runtime = 'edge';
 export const dynamic = 'force-dynamic';
 
 function buildDeps(timing: Timing): ClaimDeps {

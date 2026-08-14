@@ -14,6 +14,12 @@ export interface TimingSnapshot {
   checksCompletedAt: string | null;
   assignmentStartedAt: string | null;
   assignmentCompletedAt: string | null;
+  /**
+   * Webhook received → Trello assignment POST completed. This is the true
+   * "claim landed" time: it excludes the event-log write and response
+   * serialization that follow the assignment, which `totalProcessingMs` counts.
+   */
+  assignmentTotalMs: number | null;
   totalProcessingMs: number;
   trelloChecksMs: number | null;
   trelloAssignmentMs: number | null;
@@ -63,6 +69,10 @@ export class Timing {
       checksCompletedAt: this.iso('checksCompleted'),
       assignmentStartedAt: this.iso('assignmentStarted'),
       assignmentCompletedAt: this.iso('assignmentCompleted'),
+      assignmentTotalMs:
+        assignmentCompleted !== undefined
+          ? Math.round(assignmentCompleted - this.t0)
+          : null,
       totalProcessingMs: Math.round(now - this.t0),
       trelloChecksMs:
         checksStarted !== undefined && checksCompleted !== undefined
