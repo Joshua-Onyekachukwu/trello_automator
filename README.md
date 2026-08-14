@@ -7,12 +7,13 @@ for speed: it is effectively first-come-first-served against teammates.
 ```
 Trello ──webhook──▶ Vercel (Next.js) ──parallel reads──▶ Trello API
                           │
-                          ├── GET target card (in To Do? unclaimed?)
+                          ├── target card from the webhook payload itself
+                          │     (in To Do? unclaimed? — GET only as a fallback)
                           ├── GET my cards (in To Do / Doing?)
                           └── Supabase REST: claim state read (eligible?)
                                   │
                                   ▼
-                    Supabase: atomic daily-slot guard (one conditional UPDATE)
+                    Supabase: atomic daily-slot guard (claim_slot, one call)
                                   │
                                   ▼
                          POST add member to card (Trello is authoritative)
@@ -47,12 +48,14 @@ The state row is written only after Trello confirms the assignment.
 
 ### Race conditions & idempotency
 
-- The per-user daily slot is claimed with a single **atomic conditional UPDATE**
-  over the Supabase REST API (`WHERE user_member_id = $me AND (date <> today OR
-  eligible <> false)`), or an `INSERT ... ON CONFLICT DO NOTHING` on a fresh day.
-  Postgres serializes concurrent UPDATEs and re-evaluates the WHERE clause on the
-  committed row, so exactly one of any set of simultaneous claims wins — two
-  cards entering To Do at the same instant can never both be claimed.
+- The per-user daily slot is claimed with a single **atomic Postgres function**
+  (`claim_slot`) over the Supabase REST API — one round trip that enforces the
+  daily limit in SQL (`WHERE user_member_id = $me AND (date <> today OR p_unlock
+  OR limit = 0 OR claim_count < limit)`) and creates the row via `INSERT ... ON
+  CONFLICT DO NOTHING` on a fresh day. Postgres serializes concurrent calls and
+  re-evaluates the WHERE clause on the committed row, so exactly one of any set
+  of simultaneous claims wins — two cards entering To Do at the same instant can
+  never both be claimed, and the count can never exceed `DAILY_LIMIT`.
 - Duplicate webhook deliveries re-verify Trello state before claiming, so the
   second delivery is a no-op (the card now has a member / you are already in To Do).
 - Trello's response is authoritative. The slot is taken only immediately before
@@ -305,8 +308,11 @@ and in the structured Vercel log line:
 }
 ```
 
-- `trelloChecksMs` is the parallel GET card + GET my cards time (≈ the slower of
-  the two, not the sum — the tests prove this).
+- `trelloChecksMs` is the parallel read time. On the hot path the target card
+  comes from the webhook payload itself, so it is one Trello read (my cards) + one
+  Supabase read (state) in parallel — ≈ the slower of the two, not the sum (the
+  tests prove this). The target-card GET is only a fallback when the payload
+  lacks the card's member list.
 - `totalProcessingMs` is webhook receipt → successful Trello assignment.
 
 No "within milliseconds" claims here: read the real numbers from the deployed
@@ -316,7 +322,9 @@ network latency; real figures come from Vercel logs / `claim_events` after deplo
 
 Measured in production on the test board (real Trello webhook → Vercel):
 **~870–1070 ms** from webhook receipt to successful assignment (parallel checks
-~350–530 ms, assignment POST ~170–180 ms).
+~350–530 ms, assignment POST ~170–180 ms). A speed pass removed the target-card
+GET from the hot path (payload-trust) and folded the Code-Review unlock into the
+atomic slot call — expect lower check times on the next measured claims.
 
 ---
 

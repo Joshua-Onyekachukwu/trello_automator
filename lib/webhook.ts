@@ -17,6 +17,12 @@ export interface ParsedWebhook {
   listBeforeId: string | undefined;
   /** Archive/close flag — an archived card is not a list move. */
   closed: boolean | undefined;
+  /**
+   * Members on the card at event time (from data.card.idMembers). Present on
+   * create/update card actions — lets the claim path skip the target-card GET
+   * round trip. Undefined when the payload does not carry the array.
+   */
+  idMembers: string[] | undefined;
 }
 
 export type EventKind = 'claim' | 'eligibility' | 'ignore';
@@ -59,6 +65,9 @@ export function parseWebhookPayload(payload: unknown): ParsedWebhook | null {
     listId: firstString(listAfter?.id, createdInList?.id, card?.idList),
     listBeforeId: typeof listBefore?.id === 'string' ? listBefore.id : undefined,
     closed: typeof card?.closed === 'boolean' ? card.closed : undefined,
+    idMembers: Array.isArray(card?.idMembers)
+      ? (card.idMembers as unknown[]).filter((m): m is string => typeof m === 'string')
+      : undefined,
   };
 }
 

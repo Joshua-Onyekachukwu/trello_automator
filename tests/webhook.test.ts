@@ -50,7 +50,18 @@ describe('parseWebhookPayload', () => {
       listId: 'list-todo',
       listBeforeId: 'list-backlog',
       closed: undefined,
+      idMembers: undefined,
     });
+  });
+
+  it('extracts idMembers when the payload carries them (lets the claim path skip the GET)', () => {
+    const p = payload({ type: 'createCard', cardId: 'abc', listId: 'list-todo' });
+    const data = (p.action as { data: Record<string, unknown> }).data;
+    (data.card as Record<string, unknown>).idMembers = ['65567ddc9d55b0994df60107', 42];
+    const parsed = parseWebhookPayload(p);
+    // Only string member ids are kept — junk values are filtered out.
+    expect(parsed?.idMembers).toEqual(['65567ddc9d55b0994df60107']);
+    expect(parsed?.listId).toBe('list-todo');
   });
 
   it('falls back to data.list and card.idList when listAfter is absent', () => {

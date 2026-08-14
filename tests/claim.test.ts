@@ -225,6 +225,75 @@ describe('claimCard', () => {
     expect(store.state.claimCount).toBe(3);
   });
 
+  it('payload-trust — complete payload card → CLAIM without calling getCard', async () => {
+    const trello = new FakeTrello([card('A', 'list-todo')]);
+    const store = new FakeClaimStore();
+    const record = await claimCard('A', makeDeps(trello, store), {
+      idBoard: 'board-1',
+      idList: 'list-todo',
+      idMembers: [],
+    });
+
+    expect(record.outcome).toBe('CLAIMED');
+    expect(trello.getCardCalls).toBe(0); // the GET round trip is skipped
+    expect(trello.addMemberCalls).toEqual([{ cardId: 'A', memberId: 'member-1' }]);
+  });
+
+  it('payload-trust — payload already shows a member → DON\'T CLAIM without a GET', async () => {
+    // The fake's own card says unclaimed — the payload is the authority here.
+    const trello = new FakeTrello([card('A', 'list-todo')]);
+    const store = new FakeClaimStore();
+    const record = await claimCard('A', makeDeps(trello, store), {
+      idBoard: 'board-1',
+      idList: 'list-todo',
+      idMembers: ['alice'],
+    });
+
+    expect(record.outcome).toBe('CARD_ALREADY_CLAIMED');
+    expect(trello.getCardCalls).toBe(0);
+    expect(trello.addMemberCalls).toHaveLength(0);
+  });
+
+  it('payload-trust — payload lacking idMembers falls back to the GET', async () => {
+    const trello = new FakeTrello([card('A', 'list-todo')]);
+    const store = new FakeClaimStore();
+    const record = await claimCard('A', makeDeps(trello, store), {
+      idBoard: 'board-1',
+      idList: 'list-todo',
+      idMembers: undefined,
+    });
+
+    expect(record.outcome).toBe('CLAIMED');
+    expect(trello.getCardCalls).toBe(1); // correctness preserved via fallback
+  });
+
+  it('CR self-heal is folded into the slot call as p_unlock (no separate eligibility write)', async () => {
+    const trello = new FakeTrello([
+      card('A', 'list-todo'),
+      card('X', 'list-cr', { idMembers: ['member-1'] }),
+    ]);
+    const store = new FakeClaimStore();
+    store.state = {
+      userMemberId: 'member-1',
+      date: TODAY,
+      cardId: 'X',
+      claimCount: 1,
+      eligible: false,
+      updatedAt: null,
+    };
+
+    let unlockArg: boolean | undefined;
+    const original = store.tryClaim.bind(store);
+    store.tryClaim = (async (m, d, c, l, unlock) => {
+      unlockArg = unlock;
+      return original(m, d, c, l, unlock);
+    }) as FakeClaimStore['tryClaim'];
+
+    const record = await claimCard('A', makeDeps(trello, store));
+    expect(record.outcome).toBe('CLAIMED');
+    expect(unlockArg).toBe(true);
+  });
+
   it('Trello POST failure → TRELLO_ERROR, slot released, retry can claim', async () => {
     class PostDownTrello extends FakeTrello {
       override async addMemberToCard(): Promise<void> {

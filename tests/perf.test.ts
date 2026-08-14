@@ -76,6 +76,25 @@ describe('performance', () => {
     console.log(`[perf] local pipeline overhead: avg=${avg.toFixed(2)}ms max=${max}ms over ${samples.length} claims`);
   });
 
+  it('payload-trust: complete payload skips the target-card GET (one parallel read, not two)', async () => {
+    const trello = new FakeTrello([card('A', 'list-todo')], 60, 80);
+    const store = new FakeClaimStore();
+    const timing = new Timing();
+
+    const record = await claimCard(
+      'A',
+      { config: makeConfig(), trello, store, timing },
+      { idBoard: 'board-1', idList: 'list-todo', idMembers: [] },
+    );
+
+    expect(record.outcome).toBe('CLAIMED');
+    expect(trello.getCardCalls).toBe(0);
+    // checks ≈ one Trello read (~60 ms) instead of two — well under the 120 ms
+    // sequential budget and under the 90 ms two-parallel-reads ceiling.
+    expect(record.details.trelloChecksMs!).toBeLessThan(90);
+    console.log('[perf] payload-trust claim:', JSON.stringify(record.details));
+  });
+
   it('simulated full pipeline: parallel checks + assignment fit the latency budget', async () => {
     // Simulated realistic network: 60 ms GET card, 60 ms GET my cards, 80 ms POST.
     const trello = new FakeTrello([card('A', 'list-todo')], 60, 80);

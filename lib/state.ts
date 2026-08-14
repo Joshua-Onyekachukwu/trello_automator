@@ -10,13 +10,15 @@
  *     SET date=today, card_id=$new, eligible=false,
  *         claim_count = CASE WHEN date = today THEN claim_count + 1 ELSE 1 END
  *     WHERE user_member_id=$u
- *       AND (date <> today OR eligible <> false OR limit = 0 OR claim_count < limit)
+ *       AND (date <> today OR p_unlock OR limit = 0 OR claim_count < limit)
  *   → if 0 rows and no row exists, INSERT ... ON CONFLICT DO NOTHING
  *
- * Exactly one of any set of simultaneous claims that the limit allows wins
- * (Postgres re-evaluates the WHERE clause on the committed row), and the count
- * can never exceed the limit. A failed Trello assignment is undone with
- * `release_slot`, which decrements the count.
+ * `p_unlock` folds the Code-Review self-heal into the same atomic call: when
+ * live Trello shows the claimed card in Code Review, the claim is accepted
+ * without a separate eligibility write. Exactly one of any set of simultaneous
+ * claims that the limit allows wins (Postgres re-evaluates the WHERE clause on
+ * the committed row), and the count can never exceed the limit. A failed
+ * Trello assignment is undone with `release_slot`, which decrements the count.
  */
 
 import { getConfig } from './config';
@@ -83,8 +85,19 @@ export interface SlotResult {
 
 export interface ClaimStore {
   getState(memberId: string): Promise<ClaimState>;
-  /** Atomically claim a slot for today, enforcing the daily limit. Exactly one concurrent caller wins per allowed slot. */
-  tryClaim(memberId: string, date: string, cardId: string, dailyLimit: number): Promise<SlotResult>;
+  /**
+   * Atomically claim a slot for today, enforcing the daily limit. Exactly one
+   * concurrent caller wins per allowed slot. `unlock` folds the Code-Review
+   * self-heal into the same atomic call (the WHERE clause accepts it, so no
+   * separate eligibility write is needed).
+   */
+  tryClaim(
+    memberId: string,
+    date: string,
+    cardId: string,
+    dailyLimit: number,
+    unlock: boolean,
+  ): Promise<SlotResult>;
   /** Undo a won slot whose Trello assignment failed (decrements today's count). */
   releaseClaim(memberId: string): Promise<void>;
   /** Code Review move: unlock today's claim for this card. Returns true if changed. */
@@ -214,14 +227,20 @@ export function createStore(): ClaimStore {
       return normalizeState(Array.isArray(rows) ? rows[0] : undefined, memberId);
     },
 
-    async tryClaim(memberId, date, cardId, dailyLimit): Promise<SlotResult> {
+    async tryClaim(memberId, date, cardId, dailyLimit, unlock): Promise<SlotResult> {
       // One atomic Postgres call: enforces the daily limit and the CR-unlock
       // condition in the WHERE clause, increments claim_count in SQL, and
       // creates the row via ON CONFLICT DO NOTHING when it doesn't exist.
       const rows = await supabase<Array<{ won: boolean }>>('/rpc/claim_slot', {
         method: 'POST',
         prefer: 'return=representation',
-        body: { p_user: memberId, p_date: date, p_card: cardId, p_limit: dailyLimit },
+        body: {
+          p_user: memberId,
+          p_date: date,
+          p_card: cardId,
+          p_limit: dailyLimit,
+          p_unlock: unlock,
+        },
       });
       return { won: Array.isArray(rows) && rows[0]?.won === true };
     },

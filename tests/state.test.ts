@@ -111,9 +111,9 @@ describe('getState', () => {
 });
 
 describe('tryClaim (claim_slot RPC)', () => {
-  it('calls the atomic claim_slot function with the daily limit', async () => {
+  it('calls the atomic claim_slot function with the daily limit and unlock flag', async () => {
     const calls = stubFetch(() => ({ body: [{ won: true }] }));
-    const result = await createStore().tryClaim('m', '2026-08-14', 'A', 2);
+    const result = await createStore().tryClaim('m', '2026-08-14', 'A', 2, true);
 
     expect(result).toEqual({ won: true });
     expect(calls).toHaveLength(1);
@@ -126,19 +126,32 @@ describe('tryClaim (claim_slot RPC)', () => {
       p_date: '2026-08-14',
       p_card: 'A',
       p_limit: 2,
+      p_unlock: true,
     });
+  });
+
+  it('passes p_unlock:false when no Code-Review unlock applies', async () => {
+    const calls = stubFetch(() => ({ body: [{ won: true }] }));
+    await createStore().tryClaim('m', '2026-08-14', 'A', 1, false);
+    expect(calls[0].body).toMatchObject({ p_unlock: false });
   });
 
   it('reports won:false when the database rejects the claim', async () => {
     stubFetch(() => ({ body: [{ won: false }] }));
-    const result = await createStore().tryClaim('m', '2026-08-14', 'A', 1);
+    const result = await createStore().tryClaim('m', '2026-08-14', 'A', 1, false);
     expect(result.won).toBe(false);
   });
 
   it('passes dailyLimit 0 for unlimited', async () => {
     const calls = stubFetch(() => ({ body: [{ won: true }] }));
-    await createStore().tryClaim('m', '2026-08-14', 'A', 0);
-    expect(calls[0].body).toEqual({ p_user: 'm', p_date: '2026-08-14', p_card: 'A', p_limit: 0 });
+    await createStore().tryClaim('m', '2026-08-14', 'A', 0, false);
+    expect(calls[0].body).toEqual({
+      p_user: 'm',
+      p_date: '2026-08-14',
+      p_card: 'A',
+      p_limit: 0,
+      p_unlock: false,
+    });
   });
 });
 
@@ -241,7 +254,7 @@ describe('failure modes (fail-closed)', () => {
       status: 404,
       body: { code: 'PGRST202', message: "Could not find the function public.claim_slot" },
     }));
-    await expect(createStore().tryClaim('m', '2026-08-14', 'A', 1)).rejects.toThrow(/HTTP 404/);
+    await expect(createStore().tryClaim('m', '2026-08-14', 'A', 1, false)).rejects.toThrow(/HTTP 404/);
   });
 
   it('throws when the table does not exist (PGRST205) instead of pretending we lost the race', async () => {

@@ -33,6 +33,33 @@ export interface ClaimDeps {
 }
 
 /**
+ * The target-card facts the claim decision needs. The webhook payload carries
+ * them (data.card.idList / idMembers / board) for create/update actions, so the
+ * claim path can skip the target-card GET round trip entirely — the payload is
+ * delivered after the change, exactly as fresh as a GET made at check time.
+ * Fields are optional: when the payload lacks one (idMembers is not always
+ * present), the claim path falls back to the GET.
+ */
+export interface TargetCardInfo {
+  idBoard?: string;
+  idList?: string;
+  idMembers?: string[];
+}
+
+/** True when the payload carries everything the target-card check needs. */
+function payloadCardComplete(p: TargetCardInfo | null): p is TargetCardInfo & {
+  idList: string;
+  idMembers: string[];
+} {
+  return (
+    p !== null &&
+    typeof p.idList === 'string' &&
+    p.idList.length > 0 &&
+    Array.isArray(p.idMembers)
+  );
+}
+
+/**
  * Condition 5 — daily claim state.
  *
  * Eligible when:
@@ -70,32 +97,48 @@ export function isEligible(
   return false;
 }
 
-export async function claimCard(cardId: string, deps: ClaimDeps): Promise<ClaimRecord> {
+export async function claimCard(
+  cardId: string,
+  deps: ClaimDeps,
+  /** Card facts from the webhook payload — skips the target-card GET when complete. */
+  payloadCard: TargetCardInfo | null = null,
+): Promise<ClaimRecord> {
   const { config, trello, store, timing } = deps;
   const memberId = config.trelloMemberId;
 
   let slotWon = false;
 
   try {
-    // The state read joins the two independent Trello reads in one parallel
-    // fan-out — a third round trip that costs ~nothing on the critical path.
+    // Parallel fan-out. The target card is already in hand when the webhook
+    // payload carries it (idList + idMembers), so the GET is skipped — the hot
+    // path does one Trello read (my cards) + one Supabase read (state), in
+    // parallel. The state read stays in the fan-out: it is hidden behind the
+    // Trello read's latency and is what the daily-limit decision needs.
     timing.markChecksStarted();
-    const [targetCard, myCards, state] = await Promise.all([
-      trello.getCard(cardId),
+    const payloadComplete = payloadCardComplete(payloadCard);
+    const [myCards, state, fetchedCard] = await Promise.all([
       trello.getMyCards(memberId),
       store.getState(memberId),
+      payloadComplete ? Promise.resolve(null) : trello.getCard(cardId),
     ]);
     timing.markChecksCompleted();
     const today = lagosToday();
+    const targetCard: TargetCardInfo = fetchedCard ?? payloadCard!;
 
     // Condition 1 — the target card must be in To Do (defensive; the webhook
-    // classifier filters non-To-Do events first).
-    if (targetCard.idBoard !== config.trelloBoardId || targetCard.idList !== config.todoListId) {
+    // classifier filters non-To-Do events first). When the payload has no board
+    // id we skip the board check — the classifier already filtered by board.
+    if (
+      targetCard.idList !== config.todoListId ||
+      (targetCard.idBoard !== undefined &&
+        targetCard.idBoard !== '' &&
+        targetCard.idBoard !== config.trelloBoardId)
+    ) {
       return await finish(store, makeRecord(cardId, 'CARD_IGNORED', timing));
     }
 
     // Condition 2 — nobody may already own the target card.
-    if (targetCard.idMembers.length > 0) {
+    if (targetCard.idMembers !== undefined && targetCard.idMembers.length > 0) {
       return await finish(store, makeRecord(cardId, 'CARD_ALREADY_CLAIMED', timing));
     }
 
@@ -114,15 +157,22 @@ export async function claimCard(cardId: string, deps: ClaimDeps): Promise<ClaimR
     }
 
     // The Code Review unlock can be self-healed from live Trello data even if
-    // the CR webhook was missed. Persist it before claiming the slot, otherwise
-    // the atomic guard (which only knows stored state) would reject the claim.
-    if (state.date === today && state.eligible === false && state.cardId) {
-      await store.setEligible(memberId, state.cardId);
-    }
+    // the CR webhook was missed. It is folded into the same atomic slot call as
+    // a p_unlock flag — one round trip, no separate eligibility write.
+    const crUnlock =
+      state.date === today &&
+      state.eligible === false &&
+      state.cardId !== null &&
+      mine.some(
+        (c) =>
+          c.id === state.cardId &&
+          c.idBoard === config.trelloBoardId &&
+          c.idList === config.codeReviewListId,
+      );
 
     // Atomically take today's slot (enforcing the daily limit in the database).
     // A losing caller must stop immediately, before any Trello POST.
-    const slot = await store.tryClaim(memberId, today, cardId, config.dailyLimit);
+    const slot = await store.tryClaim(memberId, today, cardId, config.dailyLimit, crUnlock);
     slotWon = slot.won;
     if (!slot.won) {
       return await finish(store, makeRecord(cardId, 'NOT_ELIGIBLE', timing, { raceLost: true }));

@@ -52,6 +52,8 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export class FakeTrello implements TrelloClient {
   readonly cards = new Map<string, TrelloCard>();
   readonly addMemberCalls: Array<{ cardId: string; memberId: string }> = [];
+  /** How many times getCard() was called — payload-trust tests assert 0. */
+  getCardCalls = 0;
   private latencyMs = 0;
   private postLatencyMs = 0;
 
@@ -62,6 +64,7 @@ export class FakeTrello implements TrelloClient {
   }
 
   async getCard(cardId: string): Promise<TrelloCard> {
+    this.getCardCalls++;
     if (this.latencyMs > 0) await sleep(this.latencyMs);
     const c = this.cards.get(cardId);
     if (!c) throw new TrelloApiError(404, `card not found: ${cardId}`);
@@ -126,17 +129,25 @@ export class FakeClaimStore implements ClaimStore {
     return { ...this.state, userMemberId: memberId };
   }
 
-  tryClaim(memberId: string, date: string, cardId: string, dailyLimit: number): Promise<SlotResult> {
+  tryClaim(
+    memberId: string,
+    date: string,
+    cardId: string,
+    dailyLimit: number,
+    unlock = false,
+  ): Promise<SlotResult> {
     return this.serial(async () => {
       const s = this.state;
       // Mirrors claim_slot: free when there is no row, another day, unlimited,
-      // still under the daily limit, or Code-Review-unlocked (eligible=true).
+      // still under the daily limit, Code-Review-unlocked (eligible=true), or
+      // the p_unlock self-heal flag is set.
       const slotFree =
         s.cardId === null ||
         s.date !== date ||
         dailyLimit === 0 ||
         s.claimCount < dailyLimit ||
-        s.eligible === true;
+        s.eligible === true ||
+        unlock;
       if (!slotFree) return { won: false };
       this.state = {
         ...s,

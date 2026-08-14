@@ -73,7 +73,14 @@ export async function POST(
 
   try {
     if (classification.kind === 'claim') {
-      const record = await claimCard(parsed.cardId!, buildDeps(timing));
+      // Pass the card facts the payload already carries so the claim path can
+      // skip the target-card GET round trip (idMembers is not always present;
+      // claimCard falls back to a GET when it is missing).
+      const record = await claimCard(parsed.cardId!, buildDeps(timing), {
+        idBoard: parsed.boardId,
+        idList: parsed.listId,
+        idMembers: parsed.idMembers,
+      });
       log(record.eventType, {
         cardId: record.cardId,
         outcome: record.outcome,
