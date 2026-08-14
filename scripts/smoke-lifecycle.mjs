@@ -36,6 +36,8 @@ const appUrl = getArg('url', '').replace(/\/+$/, '');
 const timeoutMs = Number(getArg('timeout', '60')) * 1000;
 const keepState = args.includes('--keep-state');
 
+class SmokeError extends Error {}
+
 const {
   TRELLO_KEY,
   TRELLO_TOKEN,
@@ -161,7 +163,13 @@ async function moveCard(cardId, listId) {
 }
 
 async function archiveCard(cardId) {
-  await trello(`/cards/${cardId}?closed=true`, { method: 'PUT' });
+  // fetch resolves on HTTP errors, so check res.ok explicitly and retry once.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await trello(`/cards/${cardId}?closed=true`, { method: 'PUT' });
+    if (res.ok) return;
+    await sleep(500);
+  }
+  throw new Error(`archive failed for ${cardId}`);
 }
 
 /** Deliver a webhook payload ourselves (simulated mode) or wait for Trello's real one. */
@@ -219,7 +227,7 @@ async function main() {
         '(missing the `eligible <> false` condition). Re-run the `create or replace function claim_slot` ' +
         'block from supabase/schema.sql, then re-run this smoke.',
     );
-    process.exit(2);
+    return 2;
   }
   console.log('✅ claim_slot accepts the Code-Review-unlocked claim (eligible <> false live)');
 
@@ -237,7 +245,7 @@ async function main() {
   const fail = (msg) => {
     console.error(`\n❌ ${msg}`);
     console.log('   common causes: not eligible today, already on a To Do/Doing card, webhook not registered (no --url), app not deployed');
-    process.exit(1);
+    throw new SmokeError(msg);
   };
 
   try {
@@ -247,7 +255,9 @@ async function main() {
     console.log(`  card A ${a.id} — https://trello.com/c/${a.shortLink}`);
     await fire(a.id, 'createCard', TODO_LIST_ID, []);
     const evA = await waitForEvent(a.id, (e) => e.event_type === 'CARD_CLAIMED' && e.success, 'claim A');
-    if (!evA) fail(`card A was not claimed (last event: ${evA?.event_type ?? 'none'})`);
+    if (!evA || evA.event_type !== 'CARD_CLAIMED') {
+      fail(`card A was not claimed (last event: ${evA?.event_type ?? 'none'})`);
+    }
     steps.push(['A → To Do', 'CLAIMED', `${evA.processing_time_ms}ms${timingOf(evA)}`]);
     console.log(`  ✅ CLAIMED${timingOf(evA)}`);
 
@@ -255,7 +265,9 @@ async function main() {
     await moveCard(a.id, CODE_REVIEW_LIST_ID);
     await fire(a.id, 'updateCard', CODE_REVIEW_LIST_ID, [TRELLO_MEMBER_ID]);
     const unlocked = await waitForState((s) => s.eligible === true, 'CR unlock');
-    if (!unlocked) fail(`Code Review move did not unlock eligibility (state: ${JSON.stringify(unlocked)})`);
+    if (!unlocked?.eligible) {
+      fail(`Code Review move did not unlock eligibility (state: ${JSON.stringify(unlocked)})`);
+    }
     steps.push(['A → Code Review', 'UNLOCKED', `eligible=true, count=${unlocked.claimCount}`]);
     console.log(`  ✅ eligible=true (count stays ${unlocked.claimCount})`);
 
@@ -265,7 +277,9 @@ async function main() {
     console.log(`  card B ${b.id} — https://trello.com/c/${b.shortLink}`);
     await fire(b.id, 'createCard', TODO_LIST_ID, []);
     const evB = await waitForEvent(b.id, (e) => e.event_type === 'CARD_CLAIMED' && e.success, 'claim B');
-    if (!evB) fail(`card B was not claimed (last event: ${evB?.event_type ?? 'none'})`);
+    if (!evB || evB.event_type !== 'CARD_CLAIMED') {
+      fail(`card B was not claimed (last event: ${evB?.event_type ?? 'none'})`);
+    }
     steps.push(['B → To Do (same day)', 'CLAIMED', `${evB.processing_time_ms}ms${timingOf(evB)}`]);
     console.log(`  ✅ CLAIMED${timingOf(evB)}`);
 
@@ -286,23 +300,37 @@ async function main() {
     }
     console.log(`  claim_state: date=${state.date} card=${state.cardId} eligible=${state.eligible} count=${state.claimCount}`);
     console.log('\n✅ Full lifecycle passed.');
-    process.exit(0);
+    return 0;
   } catch (err) {
+    // Return codes instead of process.exit() so the finally block (cleanup)
+    // always runs — process.exit() would kill the process mid-cleanup.
+    if (err instanceof SmokeError) return 1;
     console.error(`\n❌ ${err.message}`);
-    process.exit(2);
+    return 2;
   } finally {
+    let archived = 0;
     for (const cardId of created) {
       try {
         await archiveCard(cardId);
+        archived++;
       } catch {
         // best-effort cleanup — the cards are clearly named for manual cleanup
       }
     }
-    if (created.length) console.log(`\nArchived ${created.length} throwaway card(s).`);
+    if (archived === created.length && created.length > 0) {
+      console.log(`\nArchived all ${created.length} throwaway card(s).`);
+    } else if (created.length > 0) {
+      console.log(
+        `\n⚠️  Archived only ${archived} of ${created.length} throwaway card(s) — ` +
+          'the rest are clearly named and left open for manual cleanup.',
+      );
+    }
   }
 }
 
-main().catch((err) => {
-  console.error('Unexpected error:', err.message);
-  process.exit(2);
-});
+main()
+  .then((code) => process.exit(code))
+  .catch((err) => {
+    console.error('Unexpected error:', err.message);
+    process.exit(2);
+  });
