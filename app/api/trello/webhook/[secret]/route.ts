@@ -13,12 +13,16 @@ import { NextRequest } from 'next/server';
 
 import { claimCard, type ClaimDeps } from '@/lib/claim';
 import { getConfig } from '@/lib/config';
+import { initConnections } from '@/lib/connections';
 import { log, logError, sanitizeError } from '@/lib/log';
 import { safeEqual } from '@/lib/security';
 import { getStore } from '@/lib/state';
 import { Timing } from '@/lib/timing';
 import { createTrelloClient } from '@/lib/trello';
 import { classifyEvent, parseWebhookPayload } from '@/lib/webhook';
+
+// Warm the Trello/Supabase keep-alive connections before any claim runs.
+initConnections();
 
 // Node runtime: the Vercel Edge runtime hangs this route (~15s per request,
 // measured 2026-08-14), which would get Trello to deactivate the webhook.
