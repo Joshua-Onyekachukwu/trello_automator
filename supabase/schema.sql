@@ -17,6 +17,11 @@ create table if not exists claim_state (
   updated_at     timestamptz not null default now()
 );
 
+-- Existing installs (created before the daily limit): add the count column.
+alter table claim_state add column if not exists claim_count integer not null default 0;
+-- Existing rows that already claimed today count as one claim.
+update claim_state set claim_count = 1 where card_id is not null and claim_count = 0;
+
 -- Append-only audit + timing log. Every claim-path decision writes one row
 -- with the full timing breakdown in `details`.
 create table if not exists claim_events (
