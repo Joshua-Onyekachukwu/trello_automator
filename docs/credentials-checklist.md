@@ -20,20 +20,27 @@ Status as of the credentials the user provided. Provided values are written only
 | `SUPABASE_SECRET_KEY` | ✅ provided (`sb_secret_...`) | authenticates against the REST API |
 | `WEBHOOK_SECRET` | ✅ generated (`npm run secret`) | in `.env.local` |
 
-## ⏳ Still needed (2 items)
+## ✅ Schema applied (user ran it in the SQL editor)
 
-1. **Run `supabase/schema.sql` in the Supabase SQL editor** — the only step that
-   requires dashboard access. The REST API cannot create tables (no SQL-over-HTTP),
-   and the management API needs an access token. Paste the file's contents into
-   **SQL Editor → Run** (takes ~10 seconds). This creates `claim_state` +
-   `claim_events` and enables RLS.
-   - Alternative: send the database password (Project Settings → Database → Reset
-     database password) and I can apply it via the Supabase CLI.
-2. **Deploy to Vercel** — needs the Vercel account: import the GitHub repo
+`supabase/schema.sql` was run — both tables answer the REST API (verified:
+`claim_state` and `claim_events` return `200 []` and accept writes). The full
+claim pipeline was exercised live against the test board: claim, Code Review
+unlock, second claim, and the no-second-claim guard all verified.
+
+## ⏳ Still needed (1 item)
+
+1. **Deploy to Vercel** — needs the Vercel account: import the GitHub repo
    (`https://github.com/Joshua-Onyekachukwu/trello_automator`), add the env vars,
    deploy. After that, set `APP_BASE_URL` to the deployed URL and register the
    webhook with `POST /api/trello/setup {"action":"create"}` (I'll do this once the
    app is live).
+
+## Test board
+
+- **[TEST] Trello Auto-Claim** — https://trello.com/b/SW5giYqC (private).
+  Currently pointed at in `.env.local`. When switching back to the main board,
+  use `npm run board -- <id-or-short-id>` and swap the four values (see README →
+  Switching boards).
 
 ## Not needed (Supabase Auth leftovers)
 

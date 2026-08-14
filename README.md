@@ -73,10 +73,11 @@ There is no cron. Each event computes the current date in `Africa/Lagos`
 
 ```
 app/
-  api/trello/webhook/route.ts   POST (events) + HEAD (Trello callback verification)
-  api/trello/setup/route.ts     admin: create / status / delete the Trello webhook
-  api/trello/status/route.ts    admin: JSON status (state, last event, webhooks)
-  page.tsx                      minimal status page
+  api/trello/webhook/[secret]/route.ts   POST (events) + HEAD (Trello callback verification)
+  api/trello/setup/route.ts              admin: create / status / delete the Trello webhook
+  api/trello/status/route.ts             admin: JSON status (state, last event, webhooks)
+  page.tsx                               minimal status page
+scripts/resolve-board.mjs                `npm run board` — resolve a board into env values
 lib/
   config.ts   env validation     trello.ts   Trello REST client
   claim.ts    claimCard()        state.ts    Supabase REST store + atomic slot guard
@@ -215,6 +216,34 @@ The suite covers the ten required scenarios plus parsing/client/perf:
 | 8 | Card not in To Do | IGNORE |
 | 9 | Duplicate webhook | no double claim |
 | 10 | Two cards nearly simultaneously | only one claimed |
+
+---
+
+## Switching boards
+
+The service watches exactly one board — the one in `TRELLO_BOARD_ID`, with its
+three list ids. To point it at a different board, resolve that board with the
+helper (it reads `TRELLO_KEY`/`TRELLO_TOKEN` from `.env.local`):
+
+```bash
+npm run board -- <board-id-or-short-id>
+```
+
+It prints the four values for the board's **To Do** / **Doing** / **Code Review**
+lists (matched by name — the board must use exactly those names). Paste them into
+`.env.local` (local) or the Vercel env vars (deployed), then restart.
+
+If the Trello webhook is registered for the previous board, re-register it after
+switching env vars:
+
+```bash
+curl -X POST https://<your-domain>/api/trello/setup \
+  -H 'Content-Type: application/json' -H 'x-admin-token: <WEBHOOK_SECRET>' \
+  -d '{"action":"delete"}'
+curl -X POST https://<your-domain>/api/trello/setup \
+  -H 'Content-Type: application/json' -H 'x-admin-token: <WEBHOOK_SECRET>' \
+  -d '{"action":"create"}'
+```
 
 ---
 

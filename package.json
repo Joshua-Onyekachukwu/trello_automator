@@ -9,7 +9,8 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "secret": "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\""
+    "secret": "node -e \"console.log(require('crypto').randomBytes(32).toString('hex'))\"",
+    "board": "node --env-file-if-exists=.env.local scripts/resolve-board.mjs"
   },
   "dependencies": {
     "next": "^15.3.4",
