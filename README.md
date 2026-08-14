@@ -288,6 +288,23 @@ Exit code: `0` = claimed, `1` = not claimed (reason printed — e.g.
 `NOT CLAIMED`, check `/api/trello/status`; the common causes are an unregistered
 webhook or already having an open card in To Do/Doing.
 
+### Full lifecycle smoke (`npm run smoke`)
+
+Re-runnable proof of the daily guard + Code Review unlock working together,
+against any configured board:
+
+```bash
+npm run smoke -- --url=http://localhost:3105   # local app, simulated webhooks
+npm run smoke                                  # deployed app, real webhooks
+```
+
+It pre-flights the installed `claim_slot` function (rejects a stale/buggy body
+before touching any card), resets today's claim slot (unless `--keep-state`),
+then drives: card A claimed → moved to Code Review (unlock) → card B claimed the
+same day → reports which guard stops a third card. Every card it creates is
+archived, even on failure. Exit codes: `0` = lifecycle passed, `1` = a step
+failed, `2` = setup/pre-flight failure.
+
 ---
 
 ## Measuring performance
