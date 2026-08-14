@@ -55,6 +55,8 @@ export class FakeTrello implements TrelloClient {
   readonly addMemberCalls: Array<{ cardId: string; memberId: string }> = [];
   /** How many times getCard() was called — payload-trust tests assert 0. */
   getCardCalls = 0;
+  /** How many times getMyCards() was called — fast-path tests assert 0. */
+  getMyCardsCalls = 0;
   private latencyMs = 0;
   private postLatencyMs = 0;
 
@@ -73,6 +75,7 @@ export class FakeTrello implements TrelloClient {
   }
 
   async getMyCards(memberId: string): Promise<TrelloMyCard[]> {
+    this.getMyCardsCalls++;
     if (this.latencyMs > 0) await sleep(this.latencyMs);
     return [...this.cards.values()]
       .filter((c) => c.idMembers.includes(memberId))
@@ -198,6 +201,33 @@ export class FakeClaimStore implements ClaimStore {
         updatedAt: new Date().toISOString(),
       };
     });
+  }
+
+  /**
+   * Cache rows the test injects. fresh=true makes the claim path trust the
+   * cache and skip the my-cards GET — the fast-path tests use this.
+   */
+  userCardCache: TrelloMyCard[] = [];
+  cacheFresh = false;
+  syncUserCardCalls: Array<{ cardId: string; boardId: string; listId: string | null }> = [];
+
+  async getMyBoardCards(memberId: string, boardId: string): Promise<{ cards: TrelloMyCard[]; fresh: boolean }> {
+    return {
+      cards: this.userCardCache.map((c) => ({ ...c, idBoard: boardId })),
+      fresh: this.cacheFresh,
+    };
+  }
+
+  async syncUserCard(cardId: string, boardId: string, listId: string | null): Promise<void> {
+    this.syncUserCardCalls.push({ cardId, boardId, listId });
+    if (!listId) {
+      this.userCardCache = this.userCardCache.filter((c) => c.id !== cardId);
+      return;
+    }
+    const existing = this.userCardCache.find((c) => c.id === cardId);
+    if (existing) existing.idList = listId;
+    else this.userCardCache.push({ id: cardId, idList: listId, idBoard: boardId, name: '' });
+    this.cacheFresh = true;
   }
 
   async insertEvent(event: ClaimEventInsert): Promise<void> {

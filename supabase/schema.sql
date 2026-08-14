@@ -27,6 +27,20 @@ alter table claim_state add column if not exists daily_limit integer;
 -- A pre-existing claim (card_id set) counts as one claim for its day.
 update claim_state set claim_count = 1 where card_id is not null and claim_count = 0;
 
+-- Membership cache for the claim fast path: one row per card the user is a
+-- member of on the configured board, with its current list. Every webhook
+-- event refreshes it from the payload (idMembers + list — zero extra Trello
+-- calls), so the claim path can skip the my-cards GET when the cache is fresh.
+create table if not exists user_cards (
+  card_id    text primary key,
+  board_id   text not null default '',
+  list_id    text not null default '',
+  updated_at timestamptz not null default now()
+);
+-- Same lockdown as the other tables: only the SECRET key (service_role) can
+-- read or write the cache; anon/publishable gets nothing.
+alter table user_cards enable row level security;
+
 -- Append-only audit + timing log. Every claim-path decision writes one row
 -- with the full timing breakdown in `details`.
 create table if not exists claim_events (

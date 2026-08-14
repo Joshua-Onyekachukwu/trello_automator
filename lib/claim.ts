@@ -100,11 +100,21 @@ export async function claimCard(
     // Trello read's latency and is what the daily-limit decision needs.
     timing.markChecksStarted();
     const payloadComplete = payloadCardComplete(payloadCard);
-    const [myCards, state, fetchedCard] = await Promise.all([
-      trello.getMyCards(memberId),
+    const [state, cached, fetchedCard] = await Promise.all([
       store.getState(memberId),
+      // Membership cache (webhook-fed). A missing table (pre-migration) or a
+      // read error returns null here and we fall back to the authoritative GET.
+      store.getMyBoardCards(memberId, config.trelloBoardId).catch(() => null),
       payloadComplete ? Promise.resolve(null) : trello.getCard(cardId),
     ]);
+
+    // Conditions 3 & 4 need the user's current cards on this board. Use the
+    // cache when it is fresh (fast path — no my-cards GET on the hot path);
+    // an empty or stale cache is never trusted and falls back to Trello.
+    const mine =
+      cached && cached.fresh
+        ? cached.cards
+        : (await trello.getMyCards(memberId)).filter((c) => c.idBoard === config.trelloBoardId);
     timing.markChecksCompleted();
     const today = lagosToday();
     const targetCard: TargetCardInfo = fetchedCard ?? payloadCard!;
@@ -127,7 +137,6 @@ export async function claimCard(
     }
 
     // Conditions 3 & 4 — user must not already be working in To Do or Doing.
-    const mine = myCards.filter((c) => c.idBoard === config.trelloBoardId);
     if (mine.some((c) => c.idList === config.todoListId)) {
       return await finish(store, makeRecord(cardId, 'USER_ALREADY_IN_TODO', timing));
     }

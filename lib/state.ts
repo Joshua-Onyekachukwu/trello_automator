@@ -23,6 +23,10 @@
  */
 
 import { getConfig } from './config';
+import type { TrelloMyCard } from './trello';
+
+/** Membership cache is trusted for the fast path only when this fresh. */
+const CACHE_FRESH_MS = 15 * 60_000;
 
 const TIMEOUT_MS = 4_000;
 
@@ -113,6 +117,21 @@ export interface ClaimStore {
    * DAILY_LIMIT env default. Upserts: works for a user with no state row yet.
    */
   setDailyLimit(memberId: string, limit: number | null): Promise<void>;
+  /**
+   * Cards the user is a member of on `boardId`, from the webhook-fed cache.
+   * `fresh` is true only when the cache has rows updated within the freshness
+   * window — a fresh cache can replace the my-cards GET on the hot path; an
+   * empty or stale cache must not be trusted (the caller falls back to Trello).
+   */
+  getMyBoardCards(
+    memberId: string,
+    boardId: string,
+  ): Promise<{ cards: TrelloMyCard[]; fresh: boolean }>;
+  /**
+   * Sync one card into the membership cache from a webhook payload. listId
+   * null = the user is not a member anymore / the card is archived → remove.
+   */
+  syncUserCard(cardId: string, boardId: string, listId: string | null): Promise<void>;
   insertEvent(event: ClaimEventInsert): Promise<void>;
   getLatestEvent(): Promise<ClaimEventRow | null>;
 }
@@ -135,6 +154,12 @@ interface EventRow {
   details: unknown;
   error_message: string | null;
   created_at: string;
+}
+
+interface UserCardRow {
+  card_id: string;
+  list_id: string | null;
+  updated_at: string | null;
 }
 
 function normalizeState(row: StateRow | undefined, memberId: string): ClaimState {
@@ -267,6 +292,45 @@ export function createStore(): ClaimStore {
         query: `on_conflict=user_member_id`,
         prefer: 'resolution=merge-duplicates',
         body: { user_member_id: memberId, daily_limit: limit },
+      });
+    },
+
+    async getMyBoardCards(memberId, boardId): Promise<{ cards: TrelloMyCard[]; fresh: boolean }> {
+      // memberId is not stored per row — this cache serves the single user the
+      // webhook syncs; multi-user would add a member_id column later.
+      const rows = await supabase<UserCardRow[]>('/user_cards', {
+        method: 'GET',
+        query: `board_id=eq.${encodeURIComponent(boardId)}&select=card_id,list_id,updated_at`,
+      });
+      const list = Array.isArray(rows) ? rows : [];
+      let newest = 0;
+      const cards = list.map((r) => {
+        const t = new Date(r.updated_at ?? 0).getTime();
+        if (!Number.isNaN(t) && t > newest) newest = t;
+        return { id: r.card_id, idList: r.list_id ?? '', idBoard: boardId, name: '' };
+      });
+      const fresh = list.length > 0 && Date.now() - newest <= CACHE_FRESH_MS;
+      return { cards, fresh };
+    },
+
+    async syncUserCard(cardId, boardId, listId): Promise<void> {
+      if (!listId) {
+        await supabase('/user_cards', {
+          method: 'DELETE',
+          query: `card_id=eq.${encodeURIComponent(cardId)}`,
+        });
+        return;
+      }
+      await supabase('/user_cards', {
+        method: 'POST',
+        query: 'on_conflict=card_id',
+        prefer: 'resolution=merge-duplicates',
+        body: {
+          card_id: cardId,
+          board_id: boardId,
+          list_id: listId,
+          updated_at: new Date().toISOString(),
+        },
       });
     },
 

@@ -20,22 +20,40 @@ import { Timing } from '../lib/timing';
 import { card, FakeClaimStore, FakeTrello, makeConfig } from './fakes';
 
 describe('performance', () => {
-  it('Trello reads are concurrent, not sequential', async () => {
-    // getCard is slower than getMyCards: 70 ms vs 50 ms.
+  it('fast path: a fresh membership cache drops the my-cards GET (checks ≈ one read)', async () => {
+    // getCard is slower than getMyCards: 70 ms vs 50 ms. With a fresh cache the
+    // claim path skips the my-cards GET entirely, so checks ≈ the single getCard
+    // read (~70 ms) — two sequential reads would be 120 ms.
     const trello = new FakeTrello([card('A', 'list-todo')], 50);
     trello.getCard = async (id) => {
       await new Promise((r) => setTimeout(r, 70));
       return trello.cards.get(id)!;
     };
     const store = new FakeClaimStore();
+    // User is on one unrelated card (not To Do / Doing); cache is fresh.
+    store.userCardCache = [{ id: 'other', idList: 'list-other', idBoard: 'board-1', name: '' }];
+    store.cacheFresh = true;
     const timing = new Timing();
 
     const record = await claimCard('A', { config: makeConfig(), trello, store, timing });
     const checksMs = record.details.trelloChecksMs as number;
 
-    // Sequential would be 50 + 70 = 120 ms. Parallel is ~70 ms.
-    expect(checksMs).toBeGreaterThan(0);
-    expect(checksMs).toBeLessThan(110);
+    expect(record.outcome).toBe('CLAIMED');
+    expect(checksMs).toBeGreaterThanOrEqual(60); // getCard's 70 ms
+    expect(checksMs).toBeLessThan(110); // well under 120 ms sequential
+    console.log(`[perf] fast-path checks=${checksMs}ms (single read, no my-cards GET)`);
+  });
+
+  it('cold cache falls back to the my-cards GET (authoritative)', async () => {
+    const trello = new FakeTrello([card('A', 'list-todo')], 0);
+    const store = new FakeClaimStore();
+    store.cacheFresh = false;
+    const timing = new Timing();
+
+    const record = await claimCard('A', { config: makeConfig(), trello, store, timing });
+    expect(record.outcome).toBe('CLAIMED');
+    // The fallback ran — cache is not trusted when stale.
+    expect(trello.getMyCardsCalls).toBeGreaterThan(0);
   });
 
   it('records the full timing breakdown on a successful claim', async () => {
@@ -95,16 +113,19 @@ describe('performance', () => {
     console.log('[perf] payload-trust claim:', JSON.stringify(record.details));
   });
 
-  it('simulated full pipeline: parallel checks + assignment fit the latency budget', async () => {
+  it('simulated full pipeline: fast-path checks + assignment fit the latency budget', async () => {
     // Simulated realistic network: 60 ms GET card, 60 ms GET my cards, 80 ms POST.
+    // A fresh cache drops the my-cards GET, so checks ≈ the one Trello read.
     const trello = new FakeTrello([card('A', 'list-todo')], 60, 80);
     const store = new FakeClaimStore();
+    store.userCardCache = [{ id: 'other', idList: 'list-other', idBoard: 'board-1', name: '' }];
+    store.cacheFresh = true;
     const timing = new Timing();
 
     const record = await claimCard('A', { config: makeConfig(), trello, store, timing });
     const d = record.details;
 
-    // checks ≈ 60 ms (parallel), assignment ≈ 80 ms, total ≈ 140 ms + overhead.
+    // checks ≈ 60 ms (one read), assignment ≈ 80 ms, total ≈ 140 ms + overhead.
     expect(record.outcome).toBe('CLAIMED');
     console.log('[perf] simulated claim:', JSON.stringify(d));
     console.log(

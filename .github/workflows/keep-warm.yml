@@ -1,0 +1,28 @@
+name: keep-warm
+
+# Keep the deployed claim functions warm so a card entering To Do never hits a
+# cold start. Runs every 5 minutes (GitHub's minimum schedule).
+#
+# Two pings:
+#   1. POST to the webhook route with a bogus secret → the handler answers 401
+#      at the secret check, which still boots and warms the webhook function
+#      without touching Trello/Supabase — no secret is stored in this repo.
+#   2. GET /api/trello/warm → exercises the Trello + Supabase reads so the
+#      warm function's keep-alive connections stay alive.
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Warm the webhook function (401 at the secret check)
+        run: |
+          curl -fsS -o /dev/null --max-time 20 \
+            -X POST "https://trello-automator.vercel.app/api/trello/webhook/keep-warm-bogus-secret" \
+            || true
+      - name: Warm Trello/Supabase connections
+        run: |
+          curl -fsS --max-time 20 "https://trello-automator.vercel.app/api/trello/warm" || true

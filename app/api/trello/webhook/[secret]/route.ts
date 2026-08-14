@@ -78,6 +78,25 @@ export async function POST(
     return new Response('OK', { status: 200 });
   }
 
+  // Keep the membership cache fresh straight from the payload (zero extra
+  // Trello calls): create/updateCard payloads carry idMembers + the card's
+  // list. A card stays cached while the user is a member of it, open, on this
+  // board; archived or no-longer-member removes it. A failing sync never fails
+  // the webhook — the claim path falls back to the authoritative GET.
+  if (
+    parsed.cardId &&
+    parsed.boardId === cfg.trelloBoardId &&
+    Array.isArray(parsed.idMembers)
+  ) {
+    const isMember = parsed.idMembers.includes(cfg.trelloMemberId);
+    const listId = isMember && parsed.closed !== true ? (parsed.listId ?? null) : null;
+    try {
+      await getStore().syncUserCard(parsed.cardId, cfg.trelloBoardId, listId);
+    } catch (err) {
+      logError('CACHE_SYNC_FAILED', { cardId: parsed.cardId, error: sanitizeError(err) });
+    }
+  }
+
   const classification = classifyEvent(parsed, cfg);
 
   try {
