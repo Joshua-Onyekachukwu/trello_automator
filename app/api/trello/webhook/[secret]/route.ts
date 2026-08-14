@@ -20,10 +20,12 @@ import { Timing } from '@/lib/timing';
 import { createTrelloClient } from '@/lib/trello';
 import { classifyEvent, parseWebhookPayload } from '@/lib/webhook';
 
-// Edge runtime: near-zero cold start. The claim path is first-come-first-served,
-// so a cold start (300-900ms on Node) can lose the race to a teammate on the
-// first card of the day. All hot-path code is pure fetch/JSON — Edge-safe.
-export const runtime = 'edge';
+// Node runtime: the Vercel Edge runtime hangs this route (~15s per request,
+// measured 2026-08-14), which would get Trello to deactivate the webhook.
+// Cold-start mitigation for the race path is handled by a keep-warm ping
+// instead. safeEqual is Edge-safe already, so this is a one-line change to
+// revisit later.
+export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 function buildDeps(timing: Timing): ClaimDeps {
