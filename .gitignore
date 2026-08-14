@@ -1,0 +1,22 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+out/
+
+# environment — never commit secrets
+.env
+.env.local
+.env*.local
+
+# logs / misc
+*.log
+.DS_Store
+.vercel
+
+# local tooling (desktop app internal data)
+.freebuff/
+
+# typescript
+*.tsbuildinfo
