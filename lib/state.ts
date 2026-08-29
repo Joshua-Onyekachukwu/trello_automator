@@ -54,6 +54,8 @@ export interface ClaimState {
    * in-memory fakes) can omit it.
    */
   dailyLimit?: number | null;
+  /** Kill switch: when false, webhook still logs but does not claim. */
+  enabled: boolean;
   updatedAt: string | null;
 }
 
@@ -94,6 +96,16 @@ export interface SlotResult {
   won: boolean;
 }
 
+export interface ScanEventInsert {
+  scanType: string;
+  cardsScanned: number;
+  cardsClaimed: number;
+  cardsSkipped: number;
+  externalClaimsSynced: number;
+  processingTimeMs: number;
+  details: Record<string, unknown> | null;
+}
+
 export interface ClaimStore {
   getState(memberId: string): Promise<ClaimState>;
   /**
@@ -117,6 +129,8 @@ export interface ClaimStore {
    * DAILY_LIMIT env default. Upserts: works for a user with no state row yet.
    */
   setDailyLimit(memberId: string, limit: number | null): Promise<void>;
+  /** Toggle the kill switch (automation enabled/disabled). */
+  setEnabled(memberId: string, enabled: boolean): Promise<void>;
   /**
    * Cards the user is a member of on `boardId`, from the webhook-fed cache.
    * `fresh` is true only when the cache has rows updated within the freshness
@@ -134,6 +148,8 @@ export interface ClaimStore {
   syncUserCard(cardId: string, boardId: string, listId: string | null): Promise<void>;
   insertEvent(event: ClaimEventInsert): Promise<void>;
   getLatestEvent(): Promise<ClaimEventRow | null>;
+  /** Insert a scan audit trail event. */
+  insertScanEvent(event: ScanEventInsert): Promise<void>;
 }
 
 interface StateRow {
@@ -142,6 +158,7 @@ interface StateRow {
   claim_count: number | null;
   eligible: boolean | null;
   daily_limit: number | null;
+  enabled: boolean | null;
   updated_at: string | null;
 }
 
@@ -164,13 +181,14 @@ interface UserCardRow {
 
 function normalizeState(row: StateRow | undefined, memberId: string): ClaimState {
   if (!row) {
-    // First run / never claimed → eligible by default.
+    // First run / never claimed → eligible by default, enabled by default.
     return {
       userMemberId: memberId,
       date: null,
       cardId: null,
       claimCount: 0,
       eligible: true,
+      enabled: true,
       updatedAt: null,
     };
   }
@@ -181,6 +199,7 @@ function normalizeState(row: StateRow | undefined, memberId: string): ClaimState
     claimCount: typeof row.claim_count === 'number' ? row.claim_count : 0,
     eligible: row.eligible === true,
     dailyLimit: typeof row.daily_limit === 'number' ? row.daily_limit : null,
+    enabled: row.enabled !== false, // default true
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
   };
 }
@@ -292,6 +311,15 @@ export function createStore(): ClaimStore {
         query: `on_conflict=user_member_id`,
         prefer: 'resolution=merge-duplicates',
         body: { user_member_id: memberId, daily_limit: limit },
+      });
+    },
+
+    async setEnabled(memberId, enabled): Promise<void> {
+      await supabase('/claim_state', {
+        method: 'POST',
+        query: `on_conflict=user_member_id`,
+        prefer: 'resolution=merge-duplicates',
+        body: { user_member_id: memberId, enabled },
       });
     },
 
@@ -408,6 +436,22 @@ export function createStore(): ClaimStore {
         errorMessage: row.error_message,
         createdAt: new Date(row.created_at).toISOString(),
       };
+    },
+
+    async insertScanEvent(event): Promise<void> {
+      await supabase('/scan_events', {
+        method: 'POST',
+        prefer: 'return=minimal',
+        body: {
+          scan_type: event.scanType,
+          cards_scanned: event.cardsScanned,
+          cards_claimed: event.cardsClaimed,
+          cards_skipped: event.cardsSkipped,
+          external_claims_synced: event.externalClaimsSynced,
+          processing_time_ms: event.processingTimeMs,
+          details: event.details,
+        },
+      });
     },
   };
 }

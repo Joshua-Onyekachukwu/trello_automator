@@ -101,6 +101,17 @@ export async function POST(
 
   try {
     if (classification.kind === 'claim') {
+      // Check kill switch: if automation is disabled, log but don't claim
+      const store = getStore();
+      const state = await store.getState(cfg.trelloMemberId);
+      if (!state.enabled) {
+        log('WEBHOOK_CLAIM_BLOCKED', {
+          cardId: parsed.cardId,
+          reason: 'automation disabled via kill switch',
+        });
+        return new Response('OK', { status: 200 });
+      }
+
       // Pass the card facts the payload already carries so the claim path can
       // skip the target-card GET round trip (idMembers is not always present;
       // claimCard falls back to a GET when it is missing).

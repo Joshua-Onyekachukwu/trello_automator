@@ -71,6 +71,7 @@ const KNOWN_EMPTY: ClaimState = {
   cardId: null,
   claimCount: 0,
   eligible: true,
+  enabled: true,
   updatedAt: null,
 };
 

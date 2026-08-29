@@ -86,6 +86,12 @@ export class FakeTrello implements TrelloClient {
     return { id: boardId, name: 'Fake Board' };
   }
 
+  async getListCards(listId: string): Promise<TrelloCard[]> {
+    return [...this.cards.values()]
+      .filter((c) => c.idList === listId)
+      .map((c) => ({ ...c, idMembers: [...c.idMembers] }));
+  }
+
   async addMemberToCard(cardId: string, memberId: string): Promise<void> {
     if ((this.postLatencyMs || this.latencyMs) > 0) await sleep(this.postLatencyMs || this.latencyMs);
     const c = this.cards.get(cardId);
@@ -119,6 +125,7 @@ export class FakeClaimStore implements ClaimStore {
     cardId: null,
     claimCount: 0,
     eligible: true,
+    enabled: true,
     dailyLimit: null,
     updatedAt: null,
   };
@@ -203,6 +210,17 @@ export class FakeClaimStore implements ClaimStore {
     });
   }
 
+  async setEnabled(memberId: string, enabled: boolean): Promise<void> {
+    return this.serial(async () => {
+      this.state = {
+        ...this.state,
+        userMemberId: memberId,
+        enabled,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+  }
+
   /**
    * Cache rows the test injects. fresh=true makes the claim path trust the
    * cache and skip the my-cards GET — the fast-path tests use this.
@@ -247,5 +265,11 @@ export class FakeClaimStore implements ClaimStore {
       errorMessage: last.errorMessage,
       createdAt: new Date().toISOString(),
     };
+  }
+
+  readonly scanRecords: Array<{ scanType: string; cardsScanned: number; cardsClaimed: number; cardsSkipped: number; externalClaimsSynced: number; processingTimeMs: number; details: Record<string, unknown> | null }> = [];
+
+  async insertScanEvent(event: import('../lib/state').ScanEventInsert): Promise<void> {
+    this.scanRecords.push({ ...event, details: event.details ? { ...event.details } : null });
   }
 }

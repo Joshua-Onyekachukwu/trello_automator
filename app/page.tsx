@@ -9,6 +9,7 @@
 import { getConfig } from '@/lib/config';
 import { getStore } from '@/lib/state';
 import { createTrelloClient } from '@/lib/trello';
+import CountdownTimer from './components/CountdownTimer';
 
 export const dynamic = 'force-dynamic';
 
@@ -145,9 +146,30 @@ export default async function HomePage({
         <div style={value}>{state?.cardId ?? '—'}</div>
       </div>
       <div style={row}>
+        <div style={label}>Automation</div>
+        <div style={value}>
+          {state?.enabled !== false ? (
+            <span style={{ color: '#1a7f37' }}>ENABLED</span>
+          ) : (
+            <span style={{ color: '#c62828' }}>DISABLED</span>
+          )}
+        </div>
+      </div>
+      <div style={row}>
         <div style={label}>Time Zone</div>
         <div style={value}>Africa/Lagos (resets at midnight)</div>
       </div>
+
+      {/* Countdown Timer */}
+      {state && (
+        <CountdownTimer
+          hasClaimedToday={state.claimCount > 0}
+          claimedAt={state.updatedAt}
+          dailyLimit={effectiveLimit ?? 1}
+          claimCount={state.claimCount}
+          enabled={state.enabled !== false}
+        />
+      )}
 
       {config && (
         <form
@@ -156,21 +178,51 @@ export default async function HomePage({
           style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid #e0e0e0' }}
         >
           <div style={{ marginBottom: 6, color: '#333', fontSize: 14, fontWeight: 600 }}>
-            Daily limit
+            Settings
           </div>
-          <p style={{ margin: '0 0 10px', color: '#777', fontSize: 12 }}>
-            One card per day by default. Choose 2 per day, or Unlimited (0). Code Review never
-            unlocks the slot — only midnight resets it. Saved instantly, no redeploy.
+          <p style={{ margin: '0 0 16px', color: '#777', fontSize: 12 }}>
+            Change settings below and click Save. All changes apply instantly, no redeploy.
           </p>
+
+          {/* Daily limit */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ marginBottom: 4, color: '#555', fontSize: 13, fontWeight: 500 }}>
+              Daily limit
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+              <select name="dailyLimit" defaultValue={effectiveLimit ?? ''} style={select}>
+                <option value="1">1 per day</option>
+                <option value="2">2 per day</option>
+                <option value="0">Unlimited</option>
+                {config && (
+                  <option value="">Default (env: {config.dailyLimit})</option>
+                )}
+              </select>
+            </div>
+          </div>
+
+          {/* Kill switch */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ marginBottom: 4, color: '#555', fontSize: 13, fontWeight: 500 }}>
+              Automation
+            </div>
+            <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+              <input
+                type="checkbox"
+                name="enabled"
+                value="true"
+                defaultChecked={state?.enabled !== false}
+                style={{ width: '18px', height: '18px' }}
+              />
+              <span style={{ fontSize: '13px' }}>Enable auto-claim</span>
+            </label>
+            <p style={{ margin: '4px 0 0', color: '#777', fontSize: 11 }}>
+              When disabled, webhooks are logged but no cards are claimed.
+            </p>
+          </div>
+
+          {/* Token + save */}
           <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-            <select name="dailyLimit" defaultValue={effectiveLimit ?? ''} style={select}>
-              <option value="1">1 per day</option>
-              <option value="2">2 per day</option>
-              <option value="0">Unlimited</option>
-              {config && (
-                <option value="">Default (env: {config.dailyLimit})</option>
-              )}
-            </select>
             <input type="password" name="token" placeholder="Admin token" required style={input} />
             <button type="submit" style={button}>
               Save

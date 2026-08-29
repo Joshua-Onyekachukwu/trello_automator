@@ -1,15 +1,16 @@
 /**
- * Admin endpoint to change the daily claim limit.
+ * Admin endpoint to change the daily claim limit and toggle the kill switch.
  *
  *   POST /api/trello/config   header: x-admin-token: <WEBHOOK_SECRET>
  *   body: { "dailyLimit": 1 | 2 | 0 }   (0 = unlimited)
+ *   body: { "enabled": true | false }   (kill switch)
  *
- * Also accepts a plain HTML form (dailyLimit + token fields) so the status
- * page can offer the control without any client JavaScript.
+ * Also accepts a plain HTML form (dailyLimit + token + enabled fields) so the
+ * status page can offer the control without any client JavaScript.
  *
- * The limit is stored per-user in the database (claim_state.daily_limit) and
- * takes effect immediately — no Vercel env change or redeploy needed. NULL
- * restores the DAILY_LIMIT env default.
+ * The limit and enabled flag are stored per-user in the database
+ * (claim_state) and take effect immediately — no Vercel env change or
+ * redeploy needed. NULL restores the DAILY_LIMIT env default.
  */
 
 import { NextRequest } from 'next/server';
@@ -28,53 +29,84 @@ function parseLimit(raw: unknown): number | null {
   return n;
 }
 
+function parseEnabled(raw: unknown): boolean | null {
+  if (raw === '' || raw === null || raw === undefined) return null;
+  if (raw === 'true' || raw === true || raw === '1' || raw === 1) return true;
+  if (raw === 'false' || raw === false || raw === '0' || raw === 0) return false;
+  return null;
+}
+
 export async function POST(req: NextRequest): Promise<Response> {
   const cfg = getConfig();
   const contentType = req.headers.get('content-type') ?? '';
 
   let headerToken = req.headers.get('x-admin-token') ?? '';
   let rawLimit: unknown;
+  let rawEnabled: unknown;
   if (contentType.includes('application/json')) {
     try {
-      const body = (await req.json()) as { dailyLimit?: unknown };
+      const body = (await req.json()) as { dailyLimit?: unknown; enabled?: unknown };
       rawLimit = body.dailyLimit;
+      rawEnabled = body.enabled;
     } catch {
       return new Response('Invalid JSON', { status: 400 });
     }
   } else {
-    // Plain HTML form: token field + dailyLimit select.
+    // Plain HTML form: token field + dailyLimit select + enabled toggle.
     const form = await req.formData();
     headerToken = String(form.get('token') ?? '');
     rawLimit = form.get('dailyLimit');
+    rawEnabled = form.get('enabled');
   }
 
   if (!safeEqual(headerToken, cfg.webhookSecret)) {
     return new Response('Unauthorized', { status: 401 });
   }
 
-  const limit = parseLimit(rawLimit);
-  if (Number.isNaN(limit)) {
-    return new Response('dailyLimit must be an integer 0-100 (0 = unlimited), or empty to use the env default', {
-      status: 400,
-    });
+  const store = getStore();
+  const errors: string[] = [];
+
+  // Handle daily limit update
+  if (rawLimit !== undefined) {
+    const limit = parseLimit(rawLimit);
+    if (Number.isNaN(limit)) {
+      errors.push('dailyLimit must be an integer 0-100 (0 = unlimited), or empty to use the env default');
+    } else {
+      try {
+        await store.setDailyLimit(cfg.trelloMemberId, limit);
+      } catch (err) {
+        errors.push(`Failed to save daily limit: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
-  try {
-    await getStore().setDailyLimit(cfg.trelloMemberId, limit);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (contentType.includes('application/json')) {
-      return new Response(JSON.stringify({ ok: false, error: message }), { status: 500 });
+  // Handle kill switch toggle
+  if (rawEnabled !== undefined) {
+    const enabled = parseEnabled(rawEnabled);
+    if (enabled === null) {
+      errors.push('enabled must be true or false');
+    } else {
+      try {
+        await store.setEnabled(cfg.trelloMemberId, enabled);
+      } catch (err) {
+        errors.push(`Failed to save enabled state: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
-    return new Response(`Failed to save: ${message}`, { status: 500 });
+  }
+
+  if (errors.length > 0) {
+    if (contentType.includes('application/json')) {
+      return new Response(JSON.stringify({ ok: false, errors }), { status: 400 });
+    }
+    return new Response(`Failed to save: ${errors.join('; ')}`, { status: 400 });
   }
 
   if (contentType.includes('application/json')) {
-    return new Response(JSON.stringify({ ok: true, dailyLimit: limit }), {
+    return new Response(JSON.stringify({ ok: true, dailyLimit: rawLimit, enabled: rawEnabled }), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
   }
-  // Form submit: bounce back to the status page so it re-renders with the new limit.
+  // Form submit: bounce back to the status page so it re-renders with the new settings.
   return new Response(null, { status: 303, headers: { Location: '/?saved=1' } });
 }

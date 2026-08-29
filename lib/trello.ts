@@ -53,6 +53,7 @@ export interface TrelloClient {
   getCard(cardId: string): Promise<TrelloCard>;
   getMyCards(memberId: string): Promise<TrelloMyCard[]>;
   getBoard(boardId: string): Promise<TrelloBoard>;
+  getListCards(listId: string): Promise<TrelloCard[]>;
   addMemberToCard(cardId: string, memberId: string): Promise<void>;
   listWebhooks(): Promise<TrelloWebhookModel[]>;
   createWebhook(callbackURL: string, description: string): Promise<TrelloWebhookModel>;
@@ -136,6 +137,20 @@ export function createTrelloClient(): TrelloClient {
     async getBoard(boardId) {
       const data = (await trelloFetch(`/boards/${boardId}?fields=name`)) as Partial<TrelloBoard>;
       return { id: data.id ?? boardId, name: data.name ?? '' };
+    },
+
+    async getListCards(listId) {
+      const data = (await trelloFetch(
+        `/lists/${listId}/cards?fields=id,idList,idBoard,idMembers,name`,
+      )) as Array<Partial<TrelloCard>>;
+      if (!Array.isArray(data)) return [];
+      return data.map((c) => ({
+        id: c.id ?? '',
+        idList: c.idList ?? listId,
+        idBoard: c.idBoard ?? '',
+        idMembers: Array.isArray(c.idMembers) ? c.idMembers : [],
+        name: c.name ?? '',
+      }));
     },
 
     async addMemberToCard(cardId, memberId) {
