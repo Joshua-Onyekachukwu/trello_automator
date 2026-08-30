@@ -99,34 +99,52 @@ async function handleScan(
       (c) => c.idList === cfg.doingListId && c.idBoard === cfg.trelloBoardId,
     );
 
-    // If user is in To Do or Doing but claim_state doesn't reflect it, sync
+    // Track ALL cards the user is on in To Do and Doing
     const userInTodo = externalTodoCards.length > 0;
     const userInDoing = externalDoingCards.length > 0;
     const userWorking = userInTodo || userInDoing;
 
-    if (userWorking) {
-      const activeCard = userInTodo ? externalTodoCards[0] : externalDoingCards[0];
+    // Build a full inventory of the user's active cards
+    const myActiveCards = [
+      ...externalTodoCards.map((c) => ({ id: c.id, name: c.name, list: 'TODO' as const })),
+      ...externalDoingCards.map((c) => ({ id: c.id, name: c.name, list: 'DOING' as const })),
+    ];
+    details.myActiveCards = myActiveCards.map((c) => ({
+      id: c.id,
+      name: c.name,
+      list: c.list,
+    }));
 
-      // The user is on a card but the DB may not know.  Sync:
-      //   - If state says claimCount == 0 and today matches, the user was
-      //     assigned externally → record it so the daily limit blocks a second claim.
-      //   - If state.cardId differs from the active card, update it.
+    if (userWorking) {
+      // Pick the most relevant card for DB sync (prefer To Do, then Doing)
+      const activeCard = userInTodo ? externalTodoCards[0] : externalDoingCards[0];
+      const activeList = userInTodo ? 'TODO' : 'DOING';
+
+      log('USER_CARDS_INVENTORY', {
+        todoCount: externalTodoCards.length,
+        doingCount: externalDoingCards.length,
+        cards: myActiveCards.map((c) => `${c.name} (${c.list})`),
+      });
+
+      // Sync to DB if the state is out of date
       if (state.claimCount === 0 || state.cardId !== activeCard.id) {
         log('EXTERNAL_CLAIM_SYNCED', {
           cardId: activeCard.id,
           cardName: activeCard.name,
-          list: userInTodo ? 'TODO' : 'DOING',
+          list: activeList,
+          totalActive: myActiveCards.length,
           prevClaimCount: state.claimCount,
         });
         externalClaimsSynced++;
         details.externalClaim = {
           cardId: activeCard.id,
           cardName: activeCard.name,
-          list: userInTodo ? 'TODO' : 'DOING',
+          list: activeList,
+          allCards: myActiveCards.map((c) => ({ id: c.id, name: c.name, list: c.list })),
           syncedAt: new Date().toISOString(),
         };
 
-        // Write: ensure DB reflects that the user is working on a card today.
+        // Ensure DB reflects that the user is working on a card today.
         // This blocks a second claim via the daily limit.
         try {
           await store.tryClaim(

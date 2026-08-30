@@ -164,61 +164,80 @@ export default async function HomePage({
         <div style={value}>{state?.cardId ?? '—'}</div>
       </div>
 
-      {/* Real-time Trello state */}
+      {/* Real-time Trello state — your cards highlighted */}
       <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid #e0e0e0' }}>
         <div style={{ fontWeight: 600, fontSize: '14px', marginBottom: 8 }}>
-          🔍 Real-Time Board State
+          🔍 Your Active Cards (live from Trello)
         </div>
+
+        {/* To Do list */}
         <div style={row}>
-          <div style={label}>In To Do</div>
-          <div style={value}>
-            {realTodoCards.length === 0 && '—'}
+          <div style={label}>To Do</div>
+          <div style={{ ...value, flex: 1 }}>
+            {realTodoCards.length === 0 && <span style={{ color: '#888', fontSize: 12 }}>empty</span>}
             {realTodoCards.length > 0 && (
               <ul style={{ margin: 0, paddingLeft: 16 }}>
-                {realTodoCards.map((c) => (
-                  <li key={c.id} style={{ fontSize: 12 }}>
-                    {c.name} {c.members.length > 0 && <span style={{ color: '#888' }}>({c.members.length} member{c.members.length > 1 ? 's' : ''})</span>}
-                  </li>
-                ))}
+                {realTodoCards.map((c) => {
+                  const isMine = c.members.includes(config?.trelloMemberId ?? '');
+                  return (
+                    <li key={c.id} style={{ fontSize: 12, marginBottom: 2 }}>
+                      {isMine && <span style={{ color: '#1a7f37', fontWeight: 600 }}>👤 YOU → </span>}
+                      <span style={{ color: isMine ? '#1a7f37' : '#333' }}>{c.name}</span>
+                      {c.members.length > 0 && (
+                        <span style={{ color: '#888' }}> ({c.members.length} member{c.members.length > 1 ? 's' : ''})</span>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>
         </div>
+
+        {/* Doing list */}
         <div style={row}>
-          <div style={label}>In Doing</div>
-          <div style={value}>
-            {realDoingCards.length === 0 && '—'}
+          <div style={label}>Doing</div>
+          <div style={{ ...value, flex: 1 }}>
+            {realDoingCards.length === 0 && <span style={{ color: '#888', fontSize: 12 }}>empty</span>}
             {realDoingCards.length > 0 && (
               <ul style={{ margin: 0, paddingLeft: 16 }}>
-                {realDoingCards.map((c) => (
-                  <li key={c.id} style={{ fontSize: 12 }}>
-                    {c.name} {c.members.length > 0 && <span style={{ color: '#888' }}>({c.members.length} member{c.members.length > 1 ? 's' : ''})</span>}
-                  </li>
-                ))}
+                {realDoingCards.map((c) => {
+                  const isMine = c.members.includes(config?.trelloMemberId ?? '');
+                  return (
+                    <li key={c.id} style={{ fontSize: 12, marginBottom: 2 }}>
+                      {isMine && <span style={{ color: '#1a7f37', fontWeight: 600 }}>👤 YOU → </span>}
+                      <span style={{ color: isMine ? '#1a7f37' : '#333' }}>{c.name}</span>
+                      {c.members.length > 0 && (
+                        <span style={{ color: '#888' }}> ({c.members.length} member{c.members.length > 1 ? 's' : ''})</span>
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>
         </div>
-        <div style={row}>
-          <div style={label}>You on To Do</div>
+
+        {/* Summary: cards you're on */}
+        <div style={{ ...row, marginTop: 8, paddingTop: 8, borderTop: '1px dashed #e0e0e0' }}>
+          <div style={label}>Cards you're on</div>
           <div style={value}>
-            {realMyTodo ? (
-              <span style={{ color: '#c62828' }}>⚠️ YES — cannot claim another card</span>
-            ) : (
-              <span style={{ color: '#1a7f37' }}>No</span>
-            )}
+            {(() => {
+              const myTodo = realTodoCards.filter((c) => c.members.includes(config?.trelloMemberId ?? ''));
+              const myDoing = realDoingCards.filter((c) => c.members.includes(config?.trelloMemberId ?? ''));
+              const total = myTodo.length + myDoing.length;
+              if (total === 0) {
+                return <span style={{ color: '#1a7f37' }}>None — eligible to claim</span>;
+              }
+              return (
+                <span style={{ color: '#c62828' }}>
+                  ⚠️ {total} card{total > 1 ? 's' : ''} — cannot claim ({myTodo.length} in To Do, {myDoing.length} in Doing)
+                </span>
+              );
+            })()}
           </div>
         </div>
-        <div style={row}>
-          <div style={label}>You on Doing</div>
-          <div style={value}>
-            {realMyDoing ? (
-              <span style={{ color: '#c62828' }}>⚠️ YES — cannot claim another card</span>
-            ) : (
-              <span style={{ color: '#1a7f37' }}>No</span>
-            )}
-          </div>
-        </div>
+
         <div style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
           Checked live from Trello on each page load. DB state: eligible={String(state?.eligible)}, claimed={state?.claimCount ?? 0}
         </div>
