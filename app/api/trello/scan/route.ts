@@ -118,21 +118,10 @@ async function handleScan(
     // Compute effective daily limit
     const dailyLimit = state.dailyLimit ?? cfg.dailyLimit;
 
-    // New-day reset: if the DB date is stale (yesterday or earlier), update it
-    // to today so the status page shows correct eligibility immediately.
-    // This runs on every scan and costs one lightweight PATCH.
-    if (state.date !== today) {
-      log('NEW_DAY_RESET', {
-        prevDate: state.date,
-        newDate: today,
-        prevClaimCount: state.claimCount,
-      });
-      try {
-        await store.tryClaim(cfg.trelloMemberId, today, state.cardId ?? '', dailyLimit, false);
-      } catch {
-        // Best-effort — if it fails, claimCard will handle it on next trigger
-      }
-    }
+    // New-day detection: if the DB date is stale (yesterday or earlier),
+    // the status page already computes effectiveEligible = true via
+    // lagosToday() comparison. No DB write needed here — the claimCard()
+    // path handles the new-day transition atomically when it claims.
 
     if (userWorking) {
       // Pick the most relevant card for DB sync (prefer To Do, then Doing)
