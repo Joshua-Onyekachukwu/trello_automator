@@ -13,18 +13,21 @@ import { getStore } from '@/lib/state';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-function checkAuth(req: NextRequest): boolean {
+function checkAuth(req: NextRequest, token?: string): boolean {
   const auth = req.headers.get('authorization') ?? '';
   const secret = process.env.WEBHOOK_SECRET ?? '';
-  return secret.length > 0 && auth.includes(secret);
+  if (secret.length > 0 && auth.includes(secret)) return true;
+  if (secret.length > 0 && token === secret) return true;
+  return false;
 }
 
 export async function POST(req: NextRequest): Promise<Response> {
-  if (!checkAuth(req)) return new Response('Unauthorized', { status: 401 });
-
   try {
     const formData = await req.formData();
     const cardId = (formData.get('cardId') as string) ?? '';
+    const token = (formData.get('token') as string) ?? '';
+
+    if (!checkAuth(req, token)) return new Response('Unauthorized', { status: 401 });
 
     if (!cardId) {
       return new Response('cardId is required', { status: 400 });

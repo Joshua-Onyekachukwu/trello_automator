@@ -10,6 +10,7 @@ import { getConfig } from '@/lib/config';
 import { lagosToday } from '@/lib/dates';
 import { getStore } from '@/lib/state';
 import { createTrelloClient } from '@/lib/trello';
+import BlockedCards from './components/BlockedCards';
 import CountdownTimer from './components/CountdownTimer';
 
 export const dynamic = 'force-dynamic';
@@ -295,39 +296,7 @@ export default async function HomePage({
 
       {/* Blocked Cards */}
       {config && (
-        <div style={{ marginTop: 24, paddingTop: 16, borderTop: '1px solid #e0e0e0' }}>
-          <div style={{ marginBottom: 6, color: '#333', fontSize: 14, fontWeight: 600 }}>
-            🚫 Blocked Cards
-          </div>
-          <p style={{ margin: '0 0 12px', color: '#777', fontSize: 12 }}>
-            Cards below will never be claimed by the automation. Add a card ID to block it.
-          </p>
-          {blockedCards.length > 0 && (
-            <ul style={{ margin: '0 0 12px', padding: '0 0 0 16px' }}>
-              {blockedCards.map((c) => (
-                <li key={c.cardId} style={{ fontSize: 12, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontFamily: 'ui-monospace, monospace' }}>{c.cardId.slice(0, 8)}…</span>
-                  {c.cardName && <span style={{ color: '#555' }}>({c.cardName})</span>}
-                  <form method="POST" action="/api/trello/blocked/remove" style={{ display: 'inline' }}>
-                    <input type="hidden" name="cardId" value={c.cardId} />
-                    <button type="submit" style={{ fontSize: 11, color: '#c62828', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}>
-                      remove
-                    </button>
-                  </form>
-                </li>
-              ))}
-            </ul>
-          )}
-          {blockedCards.length === 0 && (
-            <p style={{ margin: '0 0 12px', color: '#888', fontSize: 12 }}>No cards blocked.</p>
-          )}
-          <form method="POST" action="/api/trello/blocked" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <input type="hidden" name="token" value="" />
-            <input type="text" name="cardId" placeholder="Card ID" required style={{ ...input, width: 260, margin: 0 }} />
-            <input type="text" name="cardName" placeholder="Name (optional)" style={{ ...input, width: 160, margin: 0 }} />
-            <button type="submit" style={button}>Block</button>
-          </form>
-        </div>
+        <BlockedCards initialCards={blockedCards} />
       )}
 
       {config && (
