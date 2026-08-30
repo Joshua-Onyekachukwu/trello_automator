@@ -239,7 +239,13 @@ export default async function HomePage({
         </div>
 
         <div style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
-          Checked live from Trello on each page load. DB state: eligible={String(state?.eligible)}, claimed={state?.claimCount ?? 0}
+          Checked live from Trello on each page load. DB: eligible={String(state?.eligible)}, claimed={state?.claimCount ?? 0}, card={state?.cardId?.slice(0, 8) ?? '—'}
+          {(realMyTodo || realMyDoing) && state?.eligible === false && state?.claimCount === 0 && (
+            <> · DB out of sync — you{'\''}re on a card externally but DB doesn{'\''}t know yet</>
+          )}
+          {!(realMyTodo || realMyDoing) && state?.eligible === false && (
+            <> · You{'\''}re not on any card now (moved to Code Review?). DB state persists until midnight reset.</>
+          )}
         </div>
       </div>
       <div style={row}>
