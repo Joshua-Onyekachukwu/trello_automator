@@ -115,6 +115,25 @@ async function handleScan(
       list: c.list,
     }));
 
+    // Compute effective daily limit
+    const dailyLimit = state.dailyLimit ?? cfg.dailyLimit;
+
+    // New-day reset: if the DB date is stale (yesterday or earlier), update it
+    // to today so the status page shows correct eligibility immediately.
+    // This runs on every scan and costs one lightweight PATCH.
+    if (state.date !== today) {
+      log('NEW_DAY_RESET', {
+        prevDate: state.date,
+        newDate: today,
+        prevClaimCount: state.claimCount,
+      });
+      try {
+        await store.tryClaim(cfg.trelloMemberId, today, state.cardId ?? '', dailyLimit, false);
+      } catch {
+        // Best-effort — if it fails, claimCard will handle it on next trigger
+      }
+    }
+
     if (userWorking) {
       // Pick the most relevant card for DB sync (prefer To Do, then Doing)
       const activeCard = userInTodo ? externalTodoCards[0] : externalDoingCards[0];

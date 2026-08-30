@@ -13,6 +13,8 @@ interface CountdownTimerProps {
   claimCount: number;
   /** Whether automation is enabled */
   enabled: boolean;
+  /** Server-computed real-time eligibility (accounts for midnight reset) */
+  isEligible: boolean;
 }
 
 interface TimeLeft {
@@ -76,6 +78,7 @@ export default function CountdownTimer({
   dailyLimit,
   claimCount,
   enabled,
+  isEligible,
 }: CountdownTimerProps) {
   const [timeLeft, setTimeLeft] = useState<TimeLeft | null>(null);
   const [lagosTime, setLagosTime] = useState('');
@@ -94,8 +97,8 @@ export default function CountdownTimer({
     return () => clearInterval(interval);
   }, []);
 
-  const isUnlimited = dailyLimit === 0;
-  const canClaimMore = isUnlimited || claimCount < dailyLimit;
+  // Use server-computed real-time eligibility (accounts for midnight reset)
+  const effectiveCanClaim = enabled && isEligible;
 
   // Determine status message
   let statusMessage = '';
@@ -104,15 +107,16 @@ export default function CountdownTimer({
   if (!enabled) {
     statusMessage = '⏸️ Automation paused';
     statusColor = '#666';
-  } else if (hasClaimedToday && !canClaimMore) {
-    statusMessage = '🔒 Daily limit reached';
-    statusColor = '#c62828';
-  } else if (hasClaimedToday && canClaimMore) {
-    statusMessage = '✅ Eligible for another card today';
+  } else if (effectiveCanClaim) {
+    if (hasClaimedToday) {
+      statusMessage = '✅ Eligible — daily limit not reached';
+    } else {
+      statusMessage = '🟢 Ready to claim';
+    }
     statusColor = '#1a7f37';
   } else {
-    statusMessage = '🟢 Ready to claim';
-    statusColor = '#1a7f37';
+    statusMessage = '🔒 Daily limit reached';
+    statusColor = '#c62828';
   }
 
   return (
@@ -160,7 +164,7 @@ export default function CountdownTimer({
           color: '#666',
           lineHeight: '1.4',
         }}>
-          {hasClaimedToday && !canClaimMore ? (
+          {hasClaimedToday && !effectiveCanClaim ? (
             <>until midnight reset<br />in Africa/Lagos</>
           ) : (
             <>midnight reset<br />in Africa/Lagos</>
@@ -180,7 +184,7 @@ export default function CountdownTimer({
         {statusMessage}
       </div>
 
-      {!isUnlimited && claimCount > 0 && (
+      {dailyLimit > 0 && claimCount > 0 && (
         <div style={{
           marginTop: '8px',
           fontSize: '12px',

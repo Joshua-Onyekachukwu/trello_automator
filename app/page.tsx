@@ -7,6 +7,7 @@
  */
 
 import { getConfig } from '@/lib/config';
+import { lagosToday } from '@/lib/dates';
 import { getStore } from '@/lib/state';
 import { createTrelloClient } from '@/lib/trello';
 import CountdownTimer from './components/CountdownTimer';
@@ -89,6 +90,14 @@ export default async function HomePage({
   const effectiveLimit = state?.dailyLimit ?? config?.dailyLimit ?? null;
   const limitSource = state?.dailyLimit != null ? 'custom' : config ? 'env' : null;
 
+  // Compute real-time eligibility: if it's a new Lagos day, the user is
+  // eligible regardless of what the DB says (midnight reset). This prevents
+  // stale DB state from showing "Daily limit reached" after midnight.
+  const today = lagosToday();
+  const isNewDay = state ? state.date !== today : true;
+  const effectiveEligible = state ? (isNewDay || state.eligible) : true;
+  const effectiveClaimCount = state ? (isNewDay ? 0 : state.claimCount) : 0;
+
   return (
     <main style={{ maxWidth: 640, margin: '0 auto', padding: '32px 16px' }}>
       <h1 style={{ fontSize: 22, margin: '0 0 4px' }}>Trello Auto Claim</h1>
@@ -153,11 +162,11 @@ export default async function HomePage({
       </div>
       <div style={row}>
         <div style={label}>Eligible</div>
-        <div style={value}>{state ? String(state.eligible) : '—'}</div>
+        <div style={value}>{state ? String(effectiveEligible) : '—'}</div>
       </div>
       <div style={row}>
         <div style={label}>Claimed Today</div>
-        <div style={value}>{state ? `${state.claimCount} card(s)` : '—'}</div>
+        <div style={value}>{state ? `${effectiveClaimCount} card(s)` : '—'}</div>
       </div>
       <div style={row}>
         <div style={label}>Claimed Card</div>
@@ -239,11 +248,14 @@ export default async function HomePage({
         </div>
 
         <div style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
-          Checked live from Trello on each page load. DB: eligible={String(state?.eligible)}, claimed={state?.claimCount ?? 0}, card={state?.cardId?.slice(0, 8) ?? '—'}
+          Checked live from Trello on each page load. DB: eligible={String(state?.eligible)} (effective: {String(effectiveEligible)}), claimed={state?.claimCount ?? 0} (today: {effectiveClaimCount}), card={state?.cardId?.slice(0, 8) ?? '—'}
+          {isNewDay && state?.date && (
+            <> · New day detected — eligibility reset automatically</>
+          )}
           {(realMyTodo || realMyDoing) && state?.eligible === false && state?.claimCount === 0 && (
             <> · DB out of sync — you{'\''}re on a card externally but DB doesn{'\''}t know yet</>
           )}
-          {!(realMyTodo || realMyDoing) && state?.eligible === false && (
+          {!(realMyTodo || realMyDoing) && state?.eligible === false && !isNewDay && (
             <> · You{'\''}re not on any card now (moved to Code Review?). DB state persists until midnight reset.</>
           )}
         </div>
@@ -266,11 +278,12 @@ export default async function HomePage({
       {/* Countdown Timer */}
       {state && (
         <CountdownTimer
-          hasClaimedToday={state.claimCount > 0}
+          hasClaimedToday={effectiveClaimCount > 0}
           claimedAt={state.updatedAt}
           dailyLimit={effectiveLimit ?? 1}
-          claimCount={state.claimCount}
+          claimCount={effectiveClaimCount}
           enabled={state.enabled !== false}
+          isEligible={effectiveEligible}
         />
       )}
 
