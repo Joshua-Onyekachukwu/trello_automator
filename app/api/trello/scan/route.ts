@@ -100,39 +100,45 @@ async function handleScan(
     );
 
     // If user is in To Do or Doing but claim_state doesn't reflect it, sync
-    if (externalTodoCards.length > 0 || externalDoingCards.length > 0) {
-      const userInTodo = externalTodoCards.length > 0;
-      const userInDoing = externalDoingCards.length > 0;
+    const userInTodo = externalTodoCards.length > 0;
+    const userInDoing = externalDoingCards.length > 0;
+    const userWorking = userInTodo || userInDoing;
 
-      // If user has a card in To Do but state says they claimed something else today
-      if (userInTodo && state.cardId && !externalTodoCards.some((c) => c.id === state.cardId)) {
-        // User is on a different To Do card — sync the state
-        const externalCard = externalTodoCards[0];
-        log('EXTERNAL_CLAIM_DETECTED', {
-          externalCardId: externalCard.id,
-          trackedCardId: state.cardId,
+    if (userWorking) {
+      const activeCard = userInTodo ? externalTodoCards[0] : externalDoingCards[0];
+
+      // The user is on a card but the DB may not know.  Sync:
+      //   - If state says claimCount == 0 and today matches, the user was
+      //     assigned externally → record it so the daily limit blocks a second claim.
+      //   - If state.cardId differs from the active card, update it.
+      if (state.claimCount === 0 || state.cardId !== activeCard.id) {
+        log('EXTERNAL_CLAIM_SYNCED', {
+          cardId: activeCard.id,
+          cardName: activeCard.name,
+          list: userInTodo ? 'TODO' : 'DOING',
+          prevClaimCount: state.claimCount,
         });
         externalClaimsSynced++;
         details.externalClaim = {
-          cardId: externalCard.id,
-          cardName: externalCard.name,
+          cardId: activeCard.id,
+          cardName: activeCard.name,
+          list: userInTodo ? 'TODO' : 'DOING',
           syncedAt: new Date().toISOString(),
         };
-      }
 
-      // If user is in Doing but state says they're not working
-      if (userInDoing && state.claimCount === 0) {
-        const doingCard = externalDoingCards[0];
-        log('EXTERNAL_DOING_DETECTED', {
-          cardId: doingCard.id,
-          cardName: doingCard.name,
-        });
-        externalClaimsSynced++;
-        details.externalDoing = {
-          cardId: doingCard.id,
-          cardName: doingCard.name,
-          syncedAt: new Date().toISOString(),
-        };
+        // Write: ensure DB reflects that the user is working on a card today.
+        // This blocks a second claim via the daily limit.
+        try {
+          await store.tryClaim(
+            cfg.trelloMemberId,
+            today,
+            activeCard.id,
+            state.dailyLimit ?? cfg.dailyLimit,
+            false,
+          );
+        } catch {
+          // Best-effort sync — don't fail the scan if the write fails.
+        }
       }
     }
 

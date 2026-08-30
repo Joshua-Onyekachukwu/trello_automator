@@ -33,6 +33,11 @@ export default async function HomePage({
   let lastEvent: Awaited<ReturnType<ReturnType<typeof getStore>['getLatestEvent']>> | null = null;
   let webhookStatus: 'connected' | 'disconnected' | 'unknown' = 'unknown';
   let boardName = '';
+  // Real-time Trello state — checked on every page load
+  let realTodoCards: { id: string; name: string; members: string[] }[] = [];
+  let realDoingCards: { id: string; name: string; members: string[] }[] = [];
+  let realMyTodo = false;
+  let realMyDoing = false;
 
   try {
     config = getConfig();
@@ -65,6 +70,19 @@ export default async function HomePage({
       boardName = board.name;
     } catch {
       boardName = '';
+    }
+    // Check real Trello state on every page load
+    try {
+      const [todoCards, doingCards] = await Promise.all([
+        trello.getListCards(config.todoListId),
+        trello.getListCards(config.doingListId),
+      ]);
+      realTodoCards = todoCards.map((c) => ({ id: c.id, name: c.name, members: c.idMembers }));
+      realDoingCards = doingCards.map((c) => ({ id: c.id, name: c.name, members: c.idMembers }));
+      realMyTodo = realTodoCards.some((c) => c.members.includes(config!.trelloMemberId));
+      realMyDoing = realDoingCards.some((c) => c.members.includes(config!.trelloMemberId));
+    } catch {
+      // Trello read failed — fall back to DB-only state
     }
   }
 
@@ -144,6 +162,66 @@ export default async function HomePage({
       <div style={row}>
         <div style={label}>Claimed Card</div>
         <div style={value}>{state?.cardId ?? '—'}</div>
+      </div>
+
+      {/* Real-time Trello state */}
+      <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid #e0e0e0' }}>
+        <div style={{ fontWeight: 600, fontSize: '14px', marginBottom: 8 }}>
+          🔍 Real-Time Board State
+        </div>
+        <div style={row}>
+          <div style={label}>In To Do</div>
+          <div style={value}>
+            {realTodoCards.length === 0 && '—'}
+            {realTodoCards.length > 0 && (
+              <ul style={{ margin: 0, paddingLeft: 16 }}>
+                {realTodoCards.map((c) => (
+                  <li key={c.id} style={{ fontSize: 12 }}>
+                    {c.name} {c.members.length > 0 && <span style={{ color: '#888' }}>({c.members.length} member{c.members.length > 1 ? 's' : ''})</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+        <div style={row}>
+          <div style={label}>In Doing</div>
+          <div style={value}>
+            {realDoingCards.length === 0 && '—'}
+            {realDoingCards.length > 0 && (
+              <ul style={{ margin: 0, paddingLeft: 16 }}>
+                {realDoingCards.map((c) => (
+                  <li key={c.id} style={{ fontSize: 12 }}>
+                    {c.name} {c.members.length > 0 && <span style={{ color: '#888' }}>({c.members.length} member{c.members.length > 1 ? 's' : ''})</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+        <div style={row}>
+          <div style={label}>You on To Do</div>
+          <div style={value}>
+            {realMyTodo ? (
+              <span style={{ color: '#c62828' }}>⚠️ YES — cannot claim another card</span>
+            ) : (
+              <span style={{ color: '#1a7f37' }}>No</span>
+            )}
+          </div>
+        </div>
+        <div style={row}>
+          <div style={label}>You on Doing</div>
+          <div style={value}>
+            {realMyDoing ? (
+              <span style={{ color: '#c62828' }}>⚠️ YES — cannot claim another card</span>
+            ) : (
+              <span style={{ color: '#1a7f37' }}>No</span>
+            )}
+          </div>
+        </div>
+        <div style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
+          Checked live from Trello on each page load. DB state: eligible={String(state?.eligible)}, claimed={state?.claimCount ?? 0}
+        </div>
       </div>
       <div style={row}>
         <div style={label}>Automation</div>

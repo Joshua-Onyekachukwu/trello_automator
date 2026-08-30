@@ -53,10 +53,14 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
   } else {
     // Plain HTML form: token field + dailyLimit select + enabled toggle.
+    // HTML checkboxes only appear in form data when CHECKED — an unchecked
+    // checkbox is absent, so form.get('enabled') returns null.  We treat
+    // null as false (unchecked) for the form path only.
     const form = await req.formData();
     headerToken = String(form.get('token') ?? '');
     rawLimit = form.get('dailyLimit');
-    rawEnabled = form.get('enabled');
+    const cb = form.get('enabled');
+    rawEnabled = cb === null ? false : cb;
   }
 
   if (!safeEqual(headerToken, cfg.webhookSecret)) {
