@@ -168,9 +168,13 @@ async function handleScan(
       }
     }
 
-    // Step 3: Find unclaimed cards in To Do (no members)
+    // Step 3: Get blocked cards and find unclaimed, non-blocked cards in To Do
+    const blockedCards = await store.getBlockedCards();
+    const blockedIds = new Set(blockedCards.map((c) => c.cardId));
+    details.blockedCards = blockedCards.map((c) => ({ id: c.cardId, name: c.cardName }));
+
     const unclaimedCards = todoCards.filter(
-      (c) => !c.idMembers || c.idMembers.length === 0,
+      (c) => (!c.idMembers || c.idMembers.length === 0) && !blockedIds.has(c.id),
     );
     details.unclaimedCards = unclaimedCards.length;
 

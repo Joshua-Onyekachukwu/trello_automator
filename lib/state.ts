@@ -106,6 +106,12 @@ export interface ScanEventInsert {
   details: Record<string, unknown> | null;
 }
 
+export interface BlockedCard {
+  cardId: string;
+  cardName: string;
+  addedAt: string;
+}
+
 export interface ClaimStore {
   getState(memberId: string): Promise<ClaimState>;
   /**
@@ -150,6 +156,12 @@ export interface ClaimStore {
   getLatestEvent(): Promise<ClaimEventRow | null>;
   /** Insert a scan audit trail event. */
   insertScanEvent(event: ScanEventInsert): Promise<void>;
+  /** Get all blocked card IDs. */
+  getBlockedCards(): Promise<BlockedCard[]>;
+  /** Add a card to the blocklist. */
+  addBlockedCard(cardId: string, cardName: string): Promise<void>;
+  /** Remove a card from the blocklist. */
+  removeBlockedCard(cardId: string): Promise<void>;
 }
 
 interface StateRow {
@@ -451,6 +463,36 @@ export function createStore(): ClaimStore {
           processing_time_ms: event.processingTimeMs,
           details: event.details,
         },
+      });
+    },
+
+    async getBlockedCards(): Promise<BlockedCard[]> {
+      try {
+        const rows = await supabase<Array<{ card_id: string; card_name: string; added_at: string }>>(
+          '/blocked_cards',
+          { method: 'GET', query: 'select=card_id,card_name,added_at&order=added_at.desc' },
+        );
+        return Array.isArray(rows)
+          ? rows.map((r) => ({ cardId: r.card_id, cardName: r.card_name, addedAt: r.added_at }))
+          : [];
+      } catch {
+        return []; // table may not exist yet
+      }
+    },
+
+    async addBlockedCard(cardId, cardName): Promise<void> {
+      await supabase('/blocked_cards', {
+        method: 'POST',
+        prefer: 'resolution=merge-duplicates',
+        query: 'on_conflict=card_id',
+        body: { card_id: cardId, card_name: cardName },
+      });
+    },
+
+    async removeBlockedCard(cardId): Promise<void> {
+      await supabase('/blocked_cards', {
+        method: 'DELETE',
+        query: `card_id=eq.${encodeURIComponent(cardId)}`,
       });
     },
   };

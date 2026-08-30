@@ -272,4 +272,18 @@ export class FakeClaimStore implements ClaimStore {
   async insertScanEvent(event: import('../lib/state').ScanEventInsert): Promise<void> {
     this.scanRecords.push({ ...event, details: event.details ? { ...event.details } : null });
   }
+
+  blockedCards: Array<{ cardId: string; cardName: string; addedAt: string }> = [];
+
+  async getBlockedCards(): Promise<Array<{ cardId: string; cardName: string; addedAt: string }>> {
+    return [...this.blockedCards];
+  }
+
+  async addBlockedCard(cardId: string, cardName: string): Promise<void> {
+    this.blockedCards.push({ cardId, cardName, addedAt: new Date().toISOString() });
+  }
+
+  async removeBlockedCard(cardId: string): Promise<void> {
+    this.blockedCards = this.blockedCards.filter((c) => c.cardId !== cardId);
+  }
 }
