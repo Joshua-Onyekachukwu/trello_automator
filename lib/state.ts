@@ -279,7 +279,7 @@ export function createStore(): ClaimStore {
     async getState(memberId: string): Promise<ClaimState> {
       const withLimit =
         `user_member_id=eq.${encodeURIComponent(memberId)}` +
-        '&select=date,card_id,claim_count,eligible,daily_limit,updated_at';
+        '&select=date,card_id,claim_count,eligible,daily_limit,enabled,updated_at';
       try {
         const rows = await supabase<StateRow[]>('/claim_state', {
           method: 'GET',
@@ -295,7 +295,7 @@ export function createStore(): ClaimStore {
           method: 'GET',
           query:
             `user_member_id=eq.${encodeURIComponent(memberId)}` +
-            '&select=date,card_id,claim_count,eligible,updated_at',
+            '&select=date,card_id,claim_count,eligible,enabled,updated_at',
         });
         const row = Array.isArray(rows) ? rows[0] : undefined;
         if (row) row.daily_limit = null;
