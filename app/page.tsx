@@ -102,8 +102,18 @@ export default async function HomePage({
   // stale DB state from showing "Daily limit reached" after midnight.
   const today = lagosToday();
   const isNewDay = state ? state.date !== today : true;
-  const effectiveEligible = state ? (isNewDay || state.eligible) : true;
   const effectiveClaimCount = state ? (isNewDay ? 0 : state.claimCount) : 0;
+  // Eligibility is based on claim count vs daily limit, NOT the stale boolean.
+  // When user changes limit from 1 to 2 mid-day, eligible should flip to true.
+  const effectiveEligible = !state
+    ? true
+    : isNewDay
+    ? true
+    : effectiveLimit === 0
+    ? true
+    : effectiveLimit != null
+    ? effectiveClaimCount < effectiveLimit
+    : true;
 
   return (
     <main style={{ maxWidth: 640, margin: '0 auto', padding: '32px 16px' }}>
