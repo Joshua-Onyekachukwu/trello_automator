@@ -14,6 +14,9 @@ out/
 *.log
 .DS_Store
 
+# coverage output
+coverage/
+
 # vercel CLI link metadata
 .vercel
 
