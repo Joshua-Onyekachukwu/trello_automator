@@ -492,6 +492,14 @@ export default async function HomePage({
             Change settings below and click Save. All changes apply instantly, no redeploy.
           </p>
 
+          {/* Admin token — one field, shared by "Clear my today" and "Save" */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ marginBottom: 4, color: '#555', fontSize: 13, fontWeight: 500 }}>
+              Admin token
+            </div>
+            <input type="password" name="token" placeholder="Admin token" required style={input} />
+          </div>
+
           {/* Manual reset */}
           <div style={{ marginBottom: 12 }}>
             <div style={{ marginBottom: 4, color: '#555', fontSize: 13, fontWeight: 500 }}>
@@ -501,7 +509,6 @@ export default async function HomePage({
               Clear today so you can be eligible again for the rest of the Lagos day.
             </p>
             <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-              <input type="password" name="token" placeholder="Admin token" required style={input} />
               <button
                 type="submit"
                 formAction="/api/trello/config/clear-today"
@@ -566,9 +573,8 @@ export default async function HomePage({
             </p>
           </div>
 
-          {/* Token + save */}
+          {/* Save */}
           <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-            <input type="password" name="token" placeholder="Admin token" required style={input} />
             <button type="submit" style={button}>
               Save
             </button>
