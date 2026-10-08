@@ -19,7 +19,14 @@
 import type { Config } from './config';
 import { lagosToday } from './dates';
 import { logError, sanitizeError } from './log';
-import type { ClaimOutcome, ClaimRecord, ClaimState, ClaimStore } from './state';
+import type {
+  ClaimOutcome,
+  ClaimRecord,
+  ClaimState,
+  ClaimStore,
+  EligibilityReason,
+  TodayAddSource,
+} from './state';
 import type { Timing } from './timing';
 import { TrelloApiError, type TrelloClient, type TrelloMyCard } from './trello';
 
@@ -67,6 +74,10 @@ function payloadCardComplete(p: TargetCardInfo | null): p is TargetCardInfo & {
  *   - the limit is 0 (unlimited), or
  *   - the number of cards claimed today is still under the daily limit.
  *
+ * This no longer grants eligibility from eligible=true alone. Removal from the
+ * claimed card can re-open eligibility for the rest of the day via a separate
+ * path (see claimCard -> removeClaimedMember logic), not via this helper.
+ *
  * `dailyLimit` is the effective limit — the per-user database override
  * (state.dailyLimit) when set, otherwise the DAILY_LIMIT env default.
  * Code Review does NOT unlock the slot — the user's rule: after moving the
@@ -79,6 +90,38 @@ export function isEligible(state: ClaimState, dailyLimit: number, today: string)
   if (state.date !== today) return true; // new Lagos day or first run
   if (dailyLimit === 0) return true; // unlimited
   return state.claimCount < dailyLimit; // still within the daily limit
+}
+
+/** Based on current live membership + today state, explain why the user is eligible/no. */
+export function eligibilityReason(
+  state: ClaimState,
+  today: string,
+  dailyLimit: number,
+  onTodo: boolean,
+  onDoing: boolean,
+  claimedCardStillMine: boolean | null,
+): EligibilityReason {
+  if (state.date !== today) return 'new_day';
+  if (dailyLimit === 0) return 'unlimited';
+  if (onTodo || onDoing) {
+    return onTodo ? 'on_todo_card' : 'on_doing_card';
+  }
+  if (state.claimCount < dailyLimit) return 'under_limit';
+  // Claimed today and still taken.
+  const stillTaken =
+    claimedCardStillMine === null
+      ? null
+      : claimedCardStillMine;
+  if (state.claimCount > 0 && !stillTaken) {
+    return 'removed_from_claimed_card';
+  }
+  if (state.claimCount > 0) {
+    return 'already_claimed_today';
+  }
+  if (state.howAdded === 'removed') {
+    return 'removed_from_claimed_card';
+  }
+  return 'unknown';
 }
 
 export async function claimCard(
@@ -120,11 +163,11 @@ export async function claimCard(
     const targetCard: TargetCardInfo = fetchedCard ?? payloadCard!;
 
     // Condition 1 — the target card must be in To Do (defensive; the webhook
-    // classifier filters non-To-Do events first). When the payload has no board
-    // id we skip the board check — the classifier already filtered by board.
+    // classifier filters non-To-Do events first). When we do not have a board
+    // id, we skip the board check — the classifier already filtered by board.
     if (
       targetCard.idList !== config.todoListId ||
-      (targetCard.idBoard !== undefined &&
+      (targetCard.idBoard != null &&
         targetCard.idBoard !== '' &&
         targetCard.idBoard !== config.trelloBoardId)
     ) {
@@ -137,10 +180,22 @@ export async function claimCard(
     }
 
     // Conditions 3 & 4 — user must not already be working in To Do or Doing.
-    if (mine.some((c) => c.idList === config.todoListId)) {
+    // This now covers any board membership on To Do/Doing, including external
+    // adds and self-adds, not only cards the automation previously claimed.
+    const onTodo = mine.some((c) => c.idList === config.todoListId);
+    const onDoing = mine.some((c) => c.idList === config.doingListId);
+    if (onTodo) {
+      await noteTodayContext(store, memberId, {
+        howAdded: 'external_add',
+        note: 'already a member of a To Do card on this board',
+      });
       return await finish(store, makeRecord(cardId, 'USER_ALREADY_IN_TODO', timing));
     }
-    if (mine.some((c) => c.idList === config.doingListId)) {
+    if (onDoing) {
+      await noteTodayContext(store, memberId, {
+        howAdded: 'external_add',
+        note: 'already a member of a Doing card on this board',
+      });
       return await finish(store, makeRecord(cardId, 'USER_ALREADY_IN_DOING', timing));
     }
 
@@ -171,6 +226,10 @@ export async function claimCard(
     } finally {
       timing.markAssignmentCompleted();
     }
+
+    // Record that the automation claimed this card today.
+    await store.recordTodayContext(memberId, cardId, 'automation', 'automation claimed this card');
+
     return await finish(store, makeRecord(cardId, 'CLAIMED', timing, { date: today }));
   } catch (err) {
     const error = sanitizeError(err);
@@ -190,6 +249,24 @@ export async function claimCard(
   }
 }
 
+/** Persist a short today-context note when we detect an interesting membership change. */
+async function noteTodayContext(
+  store: ClaimStore,
+  memberId: string,
+  opts: { howAdded: TodayAddSource; note: string; cardId?: string | null },
+): Promise<void> {
+  try {
+    if (opts.cardId != null) {
+      await store.recordTodayContext(memberId, opts.cardId, opts.howAdded, opts.note);
+    } else {
+      await store.recordMembershipNote(memberId, opts.howAdded, opts.note);
+    }
+  } catch (err) {
+    // Membership/today-context bookkeeping must never change the claim outcome.
+    logError('TODAY_CONTEXT_WRITE_FAILED', { memberId, error: sanitizeError(err) });
+  }
+}
+
 /** Persist the decision's event log row; a failing log write never changes the outcome. */
 async function finish(store: ClaimStore, record: ClaimRecord): Promise<ClaimRecord> {
   try {
@@ -205,6 +282,45 @@ async function finish(store: ClaimStore, record: ClaimRecord): Promise<ClaimReco
     logError('DB_WRITE_FAILED', { cardId: record.cardId, error: sanitizeError(err) });
   }
   return record;
+}
+
+/** Return true when the user is still a member of the previously claimed card. */
+export async function isStillOnClaimedCard(
+  trello: TrelloClient,
+  memberId: string,
+  boardId: string,
+  claimedCardId: string | null,
+): Promise<boolean | null> {
+  if (!claimedCardId) return null;
+  try {
+    const card = await trello.getCard(claimedCardId);
+    return card.idBoard === boardId && card.idMembers.includes(memberId);
+  } catch {
+    return null;
+  }
+}
+
+/** If the user is no longer on the claimed card, clear today and make them eligible again. */
+export async function tryReleaseOnRemoval(
+  store: ClaimStore,
+  memberId: string,
+  boardId: string,
+  trello: TrelloClient,
+  claimedCardId: string | null,
+  prevHowAdded: TodayAddSource,
+): Promise<boolean> {
+  if (!claimedCardId) return false;
+  const stillOn = await isStillOnClaimedCard(trello, memberId, boardId, claimedCardId);
+  if (stillOn === true) return false;
+
+  // User is no longer on the claimed card -> treat the project as gone for today.
+  await store.clearToday(
+    memberId,
+    claimedCardId,
+    'removed',
+    `removed from claimed card ${claimedCardId}; day cleared for the rest of Lagos day`,
+  );
+  return true;
 }
 
 /** Spec log-event names per decision outcome. */

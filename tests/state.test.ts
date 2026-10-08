@@ -32,6 +32,7 @@ const cfg = {
   webhookSecret: 'ws',
   appBaseUrl: 'https://app.example.com',
   dailyLimit: 1,
+  cardVisibilityState: null,
 };
 
 interface CapturedRequest {
@@ -73,6 +74,11 @@ const KNOWN_EMPTY: ClaimState = {
   eligible: true,
   enabled: true,
   updatedAt: null,
+  claimedCardId: null,
+  howAdded: 'not_taken',
+  lastMembershipCheckedAt: null,
+  lastMembershipNote: null,
+  cardVisibilityState: null,
 };
 
 beforeEach(() => {
@@ -88,6 +94,28 @@ describe('getState', () => {
     stubFetch(() => ({ body: [] }));
     const state = await createStore().getState('m');
     expect(state).toEqual(KNOWN_EMPTY);
+  });
+
+  it('normalizes today-context fields when present', async () => {
+    stubFetch(() => ({
+      body: [
+        {
+          date: '2026-08-14',
+          card_id: 'A',
+          claim_count: 1,
+          eligible: false,
+          how_added: 'automation',
+          claimed_card_id: 'A',
+          last_membership_checked_at: '2026-08-14T10:00:00Z',
+          last_membership_note: 'claimed by automation',
+        },
+      ],
+    }));
+    const state = await createStore().getState('m');
+    expect(state.claimedCardId).toBe('A');
+    expect(state.howAdded).toBe('automation');
+    expect(state.lastMembershipCheckedAt).toBe('2026-08-14T10:00:00.000Z');
+    expect(state.lastMembershipNote).toBe('claimed by automation');
   });
 
   it('normalizes a stored row including the daily claim count', async () => {
@@ -200,7 +228,39 @@ describe('setEligible', () => {
     stubFetch(() => ({ status: 404, body: { code: 'PGRST116', message: 'no rows' } }));
     expect(await createStore().setEligible('m', 'X')).toBe(false);
   });
+
+  it('recordTodayContext persists how the user got taken today', async () => {
+    const calls = stubFetch(() => ({ status: 201, body: [{ user_member_id: 'm' }] }));
+    await createStore().recordTodayContext('m', 'X', 'automation', 'automation claimed this card');
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].body).toMatchObject({
+      user_member_id: 'm',
+      claimed_card_id: 'X',
+      how_added: 'automation',
+      last_membership_note: 'automation claimed this card',
+    });
+    expect(calls[0].headers.Prefer).toBe('resolution=merge-duplicates');
+  });  it('clearToday keeps the daily claim count and resets eligibility', async () => {
+    const calls = stubFetch(() => ({ status: 204 }));
+    await createStore().clearToday('m', 'X', 'automation', 'manual clear-today: user requested reset');
+    expect(calls).toHaveLength(1);
+    expect(calls[0].method).toBe('POST');
+    expect(calls[0].url).toContain('/rpc/clear_today');
+    expect(calls[0].body).toMatchObject({
+      p_user: 'm',
+      p_card: 'X',
+      p_how_added: 'automation',
+      p_note: 'manual clear-today: user requested reset',
+    });
+  });
+
+  it('clearToday preserves previous claimed_card_id when set', async () => {
+    const calls = stubFetch(() => ({ status: 204 }));
+    await createStore().clearToday('m', 'Z', 'removed', 'manual clear-today: test');
+    expect(calls[0].body).toMatchObject({ p_card: 'Z', p_how_added: 'removed' });
+  });
 });
+;
 
 describe('events', () => {
   it('inserts an event row with the timing details', async () => {

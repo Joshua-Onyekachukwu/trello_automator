@@ -97,7 +97,7 @@ describe('webhook route', () => {
 
   it('routes a Code Review move to the eligibility path (never claims, never unlocks)', async () => {
     const store = new FakeClaimStore();
-    store.state = { userMemberId: 'member-1', date: '2026-08-14', cardId: 'cardA', claimCount: 1, eligible: false, enabled: true, updatedAt: null };
+    store.state = { userMemberId: 'member-1', date: '2026-08-14', cardId: 'cardA', claimCount: 1, eligible: false, enabled: true, updatedAt: null, claimedCardId: 'cardA', howAdded: 'automation', lastMembershipCheckedAt: null, lastMembershipNote: null };
     vi.mocked(getStore).mockReturnValue(store);
 
     const res = await callPost(trelloPayload('updateCard', 'cardA', 'list-cr'));

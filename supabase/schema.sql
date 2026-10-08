@@ -18,7 +18,14 @@ create table if not exists claim_state (
   claim_count    integer not null default 0, -- cards claimed on `date` (daily limit)
   daily_limit    integer,                    -- per-user override (1, 2, ... or 0 = unlimited);
                                               -- NULL = use the DAILY_LIMIT env default
-  updated_at     timestamptz not null default now()
+  updated_at     timestamptz not null default now(),
+
+  -- Today context: what the service associates with the user for this Lagos day.
+  -- This supports external adds, removal detection, and clearer status messages.
+  claimed_card_id     text,   -- card the service associated with the user today (if any)
+  how_added          text,   -- how the user came to be 'taken' today (see TodayAddSource)
+  last_membership_checked_at timestamptz, -- when the service last re-checked live Trello membership
+  last_membership_note      text -- short note of the last membership/removal determination
 );
 
 -- Upgrade path for an installation that predates the daily limit.
@@ -26,6 +33,17 @@ alter table claim_state add column if not exists claim_count integer not null de
 alter table claim_state add column if not exists daily_limit integer;
 -- A pre-existing claim (card_id set) counts as one claim for its day.
 update claim_state set claim_count = 1 where card_id is not null and claim_count = 0;
+
+-- Upgrade path for today-context support.
+alter table claim_state add column if not exists claimed_card_id text;
+alter table claim_state add column if not exists how_added text;
+alter table claim_state add column if not exists last_membership_checked_at timestamptz;
+alter table claim_state add column if not exists last_membership_note text;
+
+-- Optional card-visibility display hint (app-side status display only; not
+-- used by claiming or eligibility). Stored per-user so the status page can
+-- show it without a redeploy. NULL = not set (fall back to the env default).
+alter table claim_state add column if not exists card_visibility_state text;
 
 -- Membership cache for the claim fast path: one row per card the user is a
 -- member of on the configured board, with its current list. Every webhook
@@ -102,6 +120,31 @@ begin
   update claim_state set claim_count = greatest(claim_count - 1, 0), updated_at = now()
   where user_member_id = p_user and claim_count > 0;
 end $$;
+
+-- Clear today's context without touching the daily claim count.
+-- Used by the manual "clear my today" reset and by removal-based re-eligibility.
+create or replace function clear_today(
+  p_user text,
+  p_card text,
+  p_how_added text,
+  p_note text
+) returns void language plpgsql security invoker as $$
+begin
+  update claim_state
+    set date = '',
+        card_id = null,
+        claimed_card_id = p_card,
+        how_added = p_how_added,
+        eligible = true,
+        last_membership_checked_at = now(),
+        last_membership_note = p_note,
+        updated_at = now()
+    where user_member_id = p_user;
+end $$;
+
+revoke all on function clear_today(text, text, text, text) from public;
+grant execute on function clear_today(text, text, text, text) to service_role;
+
 
 -- Only the server-side SECRET key (service_role) may call the functions; the
 -- publishable/anon key gets nothing.

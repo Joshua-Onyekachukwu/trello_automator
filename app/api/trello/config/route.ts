@@ -43,11 +43,13 @@ export async function POST(req: NextRequest): Promise<Response> {
   let headerToken = req.headers.get('x-admin-token') ?? '';
   let rawLimit: unknown;
   let rawEnabled: unknown;
+  let rawCardVisibilityState: string | null = null;
   if (contentType.includes('application/json')) {
     try {
-      const body = (await req.json()) as { dailyLimit?: unknown; enabled?: unknown };
+      const body = (await req.json()) as { dailyLimit?: unknown; enabled?: unknown; cardVisibilityState?: unknown };
       rawLimit = body.dailyLimit;
       rawEnabled = body.enabled;
+      rawCardVisibilityState = body.cardVisibilityState == null ? null : String(body.cardVisibilityState);
     } catch {
       return new Response('Invalid JSON', { status: 400 });
     }
@@ -61,6 +63,8 @@ export async function POST(req: NextRequest): Promise<Response> {
     rawLimit = form.get('dailyLimit');
     const cb = form.get('enabled');
     rawEnabled = cb === null ? false : cb;
+    const visibility = form.get('cardVisibilityState');
+    rawCardVisibilityState = visibility === null || visibility === '' ? null : String(visibility);
   }
 
   if (!safeEqual(headerToken, cfg.webhookSecret)) {
@@ -95,6 +99,18 @@ export async function POST(req: NextRequest): Promise<Response> {
       } catch (err) {
         errors.push(`Failed to save enabled state: ${err instanceof Error ? err.message : String(err)}`);
       }
+    }
+  }
+
+  if (rawCardVisibilityState !== null) {
+    const visibility =
+      rawCardVisibilityState === 'visible_card' || rawCardVisibilityState === 'is_a_card'
+        ? rawCardVisibilityState
+        : null;
+    try {
+      await store.setCardVisibilityState(cfg.trelloMemberId, visibility);
+    } catch (err) {
+      errors.push(`Failed to save card visibility: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

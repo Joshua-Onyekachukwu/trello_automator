@@ -6,7 +6,7 @@
  */
 
 import type { Config } from '../lib/config';
-import type { ClaimEventInsert, ClaimEventRow, ClaimState, ClaimStore, SlotResult } from '../lib/state';
+import type { ClaimEventInsert, ClaimEventRow, ClaimState, ClaimStore, SlotResult, TodayAddSource } from '../lib/state';
 import {
   TrelloApiError,
   type TrelloBoard,
@@ -30,6 +30,7 @@ export function makeConfig(overrides: Partial<Config> = {}): Config {
     webhookSecret: 'test-secret',
     appBaseUrl: 'https://example.com',
     dailyLimit: 1,
+    cardVisibilityState: 'visible_card',
     ...overrides,
   };
 }
@@ -72,6 +73,12 @@ export class FakeTrello implements TrelloClient {
     const c = this.cards.get(cardId);
     if (!c) throw new TrelloApiError(404, `card not found: ${cardId}`);
     return { ...c, idMembers: [...c.idMembers] };
+  }
+
+  // Expose a mutable view so removal-path tests can change membership without
+  // going through addMemberToCard.
+  getMutableCard(cardId: string): TrelloCard | undefined {
+    return this.cards.get(cardId);
   }
 
   async getMyCards(memberId: string): Promise<TrelloMyCard[]> {
@@ -128,6 +135,11 @@ export class FakeClaimStore implements ClaimStore {
     enabled: true,
     dailyLimit: null,
     updatedAt: null,
+    claimedCardId: null,
+    howAdded: 'not_taken' as const,
+    lastMembershipCheckedAt: null,
+    lastMembershipNote: null,
+    cardVisibilityState: null,
   };
   readonly records: ClaimEventInsert[] = [];
   private chain: Promise<unknown> = Promise.resolve();
@@ -142,7 +154,7 @@ export class FakeClaimStore implements ClaimStore {
   }
 
   async getState(memberId: string): Promise<ClaimState> {
-    return { ...this.state, userMemberId: memberId };
+    return { ...this.state, userMemberId: memberId } as ClaimState;
   }
 
   tryClaim(
@@ -199,6 +211,58 @@ export class FakeClaimStore implements ClaimStore {
     });
   }
 
+  async recordTodayContext(
+    memberId: string,
+    claimedCardId: string | null,
+    howAdded: string,
+    membershipNote: string,
+  ): Promise<void> {
+    return this.serial(async () => {
+      this.state = {
+        ...this.state,
+        userMemberId: memberId,
+        claimedCardId,
+        howAdded: howAdded as TodayAddSource,
+        lastMembershipCheckedAt: new Date().toISOString(),
+        lastMembershipNote: membershipNote,
+      };
+    });
+  }
+
+  async recordMembershipNote(memberId: string, howAdded: string, membershipNote: string): Promise<void> {
+    return this.serial(async () => {
+      this.state = {
+        ...this.state,
+        userMemberId: memberId,
+        howAdded: howAdded as TodayAddSource,
+        lastMembershipCheckedAt: new Date().toISOString(),
+        lastMembershipNote: membershipNote,
+      };
+    });
+  }
+
+  async clearToday(
+    memberId: string,
+    prevCardId: string | null,
+    howAdded: string,
+    note: string,
+  ): Promise<void> {
+    return this.serial(async () => {
+      this.state = {
+        ...this.state,
+        userMemberId: memberId,
+        date: '',
+        cardId: null,
+        eligible: true,
+        claimedCardId: prevCardId ?? this.state.claimedCardId,
+        howAdded: howAdded as TodayAddSource,
+        lastMembershipCheckedAt: new Date().toISOString(),
+        lastMembershipNote: note,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+  }
+
   setDailyLimit(memberId: string, limit: number | null): Promise<void> {
     return this.serial(async () => {
       this.state = {
@@ -216,6 +280,17 @@ export class FakeClaimStore implements ClaimStore {
         ...this.state,
         userMemberId: memberId,
         enabled,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+  }
+
+  async setCardVisibilityState(memberId: string, value: 'visible_card' | 'is_a_card' | null): Promise<void> {
+    return this.serial(async () => {
+      this.state = {
+        ...this.state,
+        userMemberId: memberId,
+        cardVisibilityState: value,
         updatedAt: new Date().toISOString(),
       };
     });

@@ -19,6 +19,14 @@ export interface Config {
   appBaseUrl: string;
   /** Max claims per Lagos day. 0 = unlimited. */
   dailyLimit: number;
+  /**
+   * Optional card visibility for this board. When set, the status page shows
+   * whether the latest relevant card is visible or is a card, without changing
+   * any claiming or eligibility logic.
+   *
+   * Defaults to the CARD_VISIBILITY_STATE env var when present; otherwise null.
+   */
+  cardVisibilityState: 'visible_card' | 'is_a_card' | null;
 }
 
 const REQUIRED = [
@@ -56,6 +64,7 @@ export function getConfig(env: Record<string, string | undefined> = process.env)
     webhookSecret: env.WEBHOOK_SECRET!,
     appBaseUrl: (env.APP_BASE_URL ?? '').replace(/\/+$/, ''),
     dailyLimit: parseDailyLimit(env.DAILY_LIMIT),
+    cardVisibilityState: parseCardVisibilityState(env.CARD_VISIBILITY_STATE),
   };
 }
 
@@ -67,4 +76,12 @@ function parseDailyLimit(raw: string | undefined): number {
     throw new Error(`Invalid DAILY_LIMIT: "${raw}" — use 0 (unlimited) or a positive integer.`);
   }
   return value;
+}
+
+/** CARD_VISIBILITY_STATE: optional display hint. Empty = null; otherwise 'visible_card' or 'is_a_card'. */
+function parseCardVisibilityState(raw: string | undefined): 'visible_card' | 'is_a_card' | null {
+  const trimmed = raw?.trim();
+  if (!trimmed) return null;
+  if (trimmed === 'visible_card' || trimmed === 'is_a_card') return trimmed;
+  throw new Error(`Invalid CARD_VISIBILITY_STATE: "${raw}" — use 'visible_card', 'is_a_card', or leave empty.`);
 }

@@ -8,10 +8,56 @@
 
 import { getConfig } from '@/lib/config';
 import { lagosToday } from '@/lib/dates';
-import { getStore } from '@/lib/state';
+import {
+  type ClaimState,
+  type EligibilityReason,
+  type TodayAddSource,
+  getStore,
+} from '@/lib/state';
 import { createTrelloClient } from '@/lib/trello';
 import BlockedCards from './components/BlockedCards';
 import CountdownTimer from './components/CountdownTimer';
+
+function formatHowAdded(source: TodayAddSource): string {
+  return {
+    automation: 'automation claimed it',
+    external_add: 'someone added you / you were added from outside',
+    self_add: 'you added yourself to a card',
+    removed: 'you were removed from the claimed card',
+    code_review: 'your claimed card is in Code Review',
+    membership_unknown: 'membership not yet checked',
+    not_taken: 'no project taken today',
+  }[source] ?? source;
+}
+
+function formatEligibilityReason(
+  reason: EligibilityReason,
+  howAdded: TodayAddSource,
+  onTodo: boolean,
+  onDoing: boolean,
+): string {
+  if (reason === 'new_day') return 'new Lagos day — eligible again';
+  if (reason === 'unlimited') return 'unlimited — eligible again';
+  if (reason === 'under_limit') return 'under today\'s limit — eligible';
+  if (reason === 'on_todo_card') return 'you are already on a To Do card';
+  if (reason === 'on_doing_card') return 'you are already on a Doing card';
+  if (reason === 'already_claimed_today') {
+    if (howAdded === 'code_review') {
+      return 'claimed today and card is in Code Review — still taken until midnight';
+    }
+    return 'already claimed today — still taken until midnight';
+  }
+  if (reason === 'removed_from_claimed_card') {
+    if (howAdded === 'removed') {
+      return 'removed from the claimed card — eligible again for the rest of the day';
+    }
+    return 'no longer on the claimed card — eligible again for the rest of the day';
+  }
+  if (reason === 'not_taken') return 'no project taken today';
+  if (onTodo) return 'you are already on a To Do card';
+  if (onDoing) return 'you are already on a Doing card';
+  return 'eligibility unclear — rechecking live membership';
+}
 
 export const dynamic = 'force-dynamic';
 
@@ -41,6 +87,12 @@ export default async function HomePage({
   let realDoingCards: { id: string; name: string; members: string[] }[] = [];
   let realMyTodo = false;
   let realMyDoing = false;
+  // Today-context interpretation
+  let todayReason: EligibilityReason | null = null;
+  let todayNote: string | null = null;
+  let todayOnTodo = false;
+  let todayOnDoing = false;
+  let todayClaimedStillMine: boolean | null = null;
 
   try {
     config = getConfig();
@@ -89,31 +141,48 @@ export default async function HomePage({
       realDoingCards = doingCards.map((c) => ({ id: c.id, name: c.name, members: c.idMembers }));
       realMyTodo = realTodoCards.some((c) => c.members.includes(config!.trelloMemberId));
       realMyDoing = realDoingCards.some((c) => c.members.includes(config!.trelloMemberId));
+
+      // Interpret today's eligibility using live membership + today context.
+      if (state) {
+        const today = lagosToday();
+        const dailyLimit = state.dailyLimit ?? config!.dailyLimit;
+        const claimedStillMine =
+          state?.claimedCardId
+            ? realTodoCards.some((c) => c.id === state!.claimedCardId && c.members.includes(config!.trelloMemberId)) ||
+              realDoingCards.some((c) => c.id === state!.claimedCardId && c.members.includes(config!.trelloMemberId))
+            : null;
+
+        const todayState = state as NonNullable<typeof state>;
+        todayOnTodo = realTodoCards.some((c) => c.members.includes(config!.trelloMemberId));
+        todayOnDoing = realDoingCards.some((c) => c.members.includes(config!.trelloMemberId));
+        todayClaimedStillMine = claimedStillMine !== null ? claimedStillMine : null;
+
+        const reason: EligibilityReason = todayState.date !== today
+          ? 'new_day'
+          : dailyLimit === 0
+            ? 'unlimited'
+            : todayOnTodo
+              ? 'on_todo_card'
+              : todayOnDoing
+                ? 'on_doing_card'
+                : todayState.claimCount < dailyLimit
+                  ? 'under_limit'
+                  : todayState.claimCount > 0 && claimedStillMine === false
+                    ? 'removed_from_claimed_card'
+                    : todayState.claimCount > 0
+                      ? 'already_claimed_today'
+                      : todayState.howAdded === 'removed'
+                        ? 'removed_from_claimed_card'
+                        : 'unknown';
+
+        todayReason = reason as EligibilityReason;
+        todayNote = state.lastMembershipNote ?? null;
+        todayClaimedStillMine = claimedStillMine;
+      }
     } catch {
       // Trello read failed — fall back to DB-only state
     }
   }
-
-  const effectiveLimit = state?.dailyLimit ?? config?.dailyLimit ?? null;
-  const limitSource = state?.dailyLimit != null ? 'custom' : config ? 'env' : null;
-
-  // Compute real-time eligibility: if it's a new Lagos day, the user is
-  // eligible regardless of what the DB says (midnight reset). This prevents
-  // stale DB state from showing "Daily limit reached" after midnight.
-  const today = lagosToday();
-  const isNewDay = state ? state.date !== today : true;
-  const effectiveClaimCount = state ? (isNewDay ? 0 : state.claimCount) : 0;
-  // Eligibility is based on claim count vs daily limit, NOT the stale boolean.
-  // When user changes limit from 1 to 2 mid-day, eligible should flip to true.
-  const effectiveEligible = !state
-    ? true
-    : isNewDay
-    ? true
-    : effectiveLimit === 0
-    ? true
-    : effectiveLimit != null
-    ? effectiveClaimCount < effectiveLimit
-    : true;
 
   return (
     <main style={{ maxWidth: 640, margin: '0 auto', padding: '32px 16px' }}>
@@ -140,6 +209,12 @@ export default async function HomePage({
         </div>
       </div>
       <div style={row}>
+        <div style={label}>Site Board</div>
+        <div style={value}>
+          Site Board (read-only for retry/audit; not used for claiming or eligibility).
+        </div>
+      </div>
+      <div style={row}>
         <div style={label}>Webhook</div>
         <div style={value}>
           {webhookStatus === 'connected' && <span style={{ color: '#1a7f37' }}>CONNECTED</span>}
@@ -148,13 +223,20 @@ export default async function HomePage({
         </div>
       </div>
       <div style={row}>
+        <div style={label}>Site Board</div>
+        <div style={value}>
+          {config?.trelloBoardId ? `${config.trelloBoardId.slice(0, 8)}…<wbr />` : '—'}
+        </div>
+      </div>
+      <div style={row}>
         <div style={label}>Daily Limit</div>
         <div style={value}>
-          {effectiveLimit === 0
-            ? 'Unlimited'
-            : `${effectiveLimit} per day`}
-          {limitSource === 'custom' && ' (custom)'}
-          {limitSource === 'env' && ` (env default)`}
+          {(() => {
+            const limit = state ? (state.dailyLimit ?? config!.dailyLimit) : config!.dailyLimit;
+            const source = state?.dailyLimit != null ? 'custom' : 'env';
+            return limit === 0 ? 'Unlimited' : `${limit} per day` +
+              (source === 'custom' ? ' (custom)' : source === 'env' ? ' (env default)' : '');
+          })()}
         </div>
       </div>
       <div style={row}>
@@ -179,16 +261,68 @@ export default async function HomePage({
       </div>
       <div style={row}>
         <div style={label}>Eligible</div>
-        <div style={value}>{state ? String(effectiveEligible) : '—'}</div>
+        <div style={value}>{(() => {
+          if (!state) return '—';
+          const today = lagosToday();
+          const limit = state.dailyLimit ?? config!.dailyLimit;
+          const effectiveClaimCount = state.date !== today ? 0 : state.claimCount;
+          const effectiveEligible =
+            state.date !== today
+              ? true
+              : limit === 0
+                ? true
+                : effectiveClaimCount < limit;
+          return String(effectiveEligible);
+        })()}
+        </div>
       </div>
       <div style={row}>
         <div style={label}>Claimed Today</div>
-        <div style={value}>{state ? `${effectiveClaimCount} card(s)` : '—'}</div>
+        <div style={value}>{(() => {
+          if (!state) return '—';
+          const today = lagosToday();
+          const effectiveClaimCount = state.date !== today ? 0 : state.claimCount;
+          return `${effectiveClaimCount} card(s)`;
+        })()}
+        </div>
       </div>
       <div style={row}>
         <div style={label}>Claimed Card</div>
         <div style={value}>{state?.cardId ?? '—'}</div>
       </div>
+      <div style={row}>
+        <div style={label}>How taken today</div>
+        <div style={value}>{state ? formatHowAdded(state.howAdded) : '—'}</div>
+      </div>
+      <div style={row}>
+        <div style={label}>Last membership note</div>
+        <div style={value}>{state?.lastMembershipNote ?? todayNote ?? '—'}</div>
+      </div>          <div style={row}>
+            <div style={label}>Why eligible / blocked</div>
+            <div style={{ ...value, fontWeight: state ? 500 : 400 }}>
+              {state ? (
+                todayReason === 'removed_from_claimed_card'
+                  ? 'removed from claimed card — eligible again for the rest of the day'
+                  : todayReason === 'new_day'
+                    ? 'new Lagos day — eligible again'
+                    : todayReason === 'unlimited'
+                      ? 'unlimited — eligible again'
+                      : todayReason === 'under_limit'
+                        ? 'under today\'s limit — eligible'
+                        : todayReason === 'on_todo_card'
+                          ? 'you are already on a To Do card'
+                          : todayReason === 'on_doing_card'
+                            ? 'you are already on a Doing card'
+                            : todayReason === 'already_claimed_today'
+                              ? (state.howAdded === 'code_review'
+                                ? 'claimed today and card is in Code Review — still taken until midnight'
+                                : 'already claimed today — still taken until midnight')
+                              : todayReason === 'not_taken'
+                                ? 'no project taken today'
+                                : 'eligibility unclear — rechecking live membership'
+              ) : '—'}
+            </div>
+          </div>
 
       {/* Real-time Trello state — your cards highlighted */}
       <div style={{ marginTop: 16, paddingTop: 16, borderTop: '1px solid #e0e0e0' }}>
@@ -204,7 +338,7 @@ export default async function HomePage({
             {realTodoCards.length > 0 && (
               <ul style={{ margin: 0, paddingLeft: 16 }}>
                 {realTodoCards.map((c) => {
-                  const isMine = c.members.includes(config?.trelloMemberId ?? '');
+                  const isMine = c.members.includes(config!.trelloMemberId);
                   return (
                     <li key={c.id} style={{ fontSize: 12, marginBottom: 2 }}>
                       {isMine && <span style={{ color: '#1a7f37', fontWeight: 600 }}>👤 YOU → </span>}
@@ -228,7 +362,7 @@ export default async function HomePage({
             {realDoingCards.length > 0 && (
               <ul style={{ margin: 0, paddingLeft: 16 }}>
                 {realDoingCards.map((c) => {
-                  const isMine = c.members.includes(config?.trelloMemberId ?? '');
+                  const isMine = c.members.includes(config!.trelloMemberId);
                   return (
                     <li key={c.id} style={{ fontSize: 12, marginBottom: 2 }}>
                       {isMine && <span style={{ color: '#1a7f37', fontWeight: 600 }}>👤 YOU → </span>}
@@ -249,8 +383,8 @@ export default async function HomePage({
           <div style={label}>Cards you're on</div>
           <div style={value}>
             {(() => {
-              const myTodo = realTodoCards.filter((c) => c.members.includes(config?.trelloMemberId ?? ''));
-              const myDoing = realDoingCards.filter((c) => c.members.includes(config?.trelloMemberId ?? ''));
+              const myTodo = realTodoCards.filter((c) => c.members.includes(config!.trelloMemberId));
+              const myDoing = realDoingCards.filter((c) => c.members.includes(config!.trelloMemberId));
               const total = myTodo.length + myDoing.length;
               if (total === 0) {
                 return <span style={{ color: '#1a7f37' }}>None — eligible to claim</span>;
@@ -265,15 +399,15 @@ export default async function HomePage({
         </div>
 
         <div style={{ fontSize: 12, color: '#888', marginTop: 4 }}>
-          Checked live from Trello on each page load. DB: eligible={String(state?.eligible)} (effective: {String(effectiveEligible)}), claimed={state?.claimCount ?? 0} (today: {effectiveClaimCount}), card={state?.cardId?.slice(0, 8) ?? '—'}
-          {isNewDay && state?.date && (
+          Checked live from Trello on each page load. DB eligible={String(state?.eligible)} claimed={state?.claimCount ?? 0} card={state?.cardId?.slice(0, 8) ?? '—'}
+          {(state && lagosToday() !== state.date && state.date) && (
             <> · New day detected — eligibility reset automatically</>
           )}
           {(realMyTodo || realMyDoing) && state?.eligible === false && state?.claimCount === 0 && (
-            <> · DB out of sync — you{'\''}re on a card externally but DB doesn{'\''}t know yet</>
+            <> · DB out of sync — you are on a card externally but DB does not know yet</>
           )}
-          {!(realMyTodo || realMyDoing) && state?.eligible === false && !isNewDay && (
-            <> · You{'\''}re not on any card now (moved to Code Review?). DB state persists until midnight reset.</>
+          {!(realMyTodo || realMyDoing) && state?.eligible === false && state?.date === lagosToday() && (
+            <> · You are not on any card now (moved to Code Review?). DB state persists until midnight reset.</>
           )}
         </div>
       </div>
@@ -285,6 +419,26 @@ export default async function HomePage({
           ) : (
             <span style={{ color: '#c62828' }}>DISABLED</span>
           )}
+
+
+        </div>
+      </div>
+      <div style={row}>
+        <div style={label}>Site Board</div>
+        <div style={value}>
+          Site Board (read-only for retry/audit; not used for claiming or eligibility).
+        </div>
+      </div>
+      <div style={row}>
+        <div style={label}>Card visibility</div>
+        <div style={value}>
+          {(() => {
+            if (!config) return '—';
+            const visibility = config.cardVisibilityState;
+            if (visibility === 'visible_card') return 'visible card';
+            if (visibility === 'is_a_card') return 'is a card';
+            return '—';
+          })()}
         </div>
       </div>
       <div style={row}>
@@ -295,12 +449,34 @@ export default async function HomePage({
       {/* Countdown Timer */}
       {state && (
         <CountdownTimer
-          hasClaimedToday={effectiveClaimCount > 0}
+          hasClaimedToday={(() => {
+            const today = lagosToday();
+            const effectiveClaimCount = state.date !== today ? 0 : state.claimCount;
+            return effectiveClaimCount > 0;
+          })()}
           claimedAt={state.updatedAt}
-          dailyLimit={effectiveLimit ?? 1}
-          claimCount={effectiveClaimCount}
+          dailyLimit={(() => {
+            const limit = state.dailyLimit ?? config!.dailyLimit;
+            return limit;
+          })()}
+          claimCount={(() => {
+            const today = lagosToday();
+            const effectiveClaimCount = state.date !== today ? 0 : state.claimCount;
+            return effectiveClaimCount;
+          })()}
           enabled={state.enabled !== false}
-          isEligible={effectiveEligible}
+          isEligible={(() => {
+            const today = lagosToday();
+            const limit = state.dailyLimit ?? config!.dailyLimit;
+            const effectiveClaimCount = state.date !== today ? 0 : state.claimCount;
+            const effectiveEligible =
+              state.date !== today
+                ? true
+                : limit === 0
+                  ? true
+                  : effectiveClaimCount < limit;
+            return effectiveEligible;
+          })()}
         />
       )}
 
@@ -322,20 +498,60 @@ export default async function HomePage({
             Change settings below and click Save. All changes apply instantly, no redeploy.
           </p>
 
+          {/* Manual reset */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ marginBottom: 4, color: '#555', fontSize: 13, fontWeight: 500 }}>
+              Manual reset
+            </div>
+            <p style={{ margin: '0 0 8px', color: '#777', fontSize: 12 }}>
+              Clear today so you can be eligible again for the rest of the Lagos day.
+            </p>
+            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+              <input type="password" name="token" placeholder="Admin token" required style={input} />
+              <button
+                type="submit"
+                formAction="/api/trello/config/clear-today"
+                style={{ ...button, background: '#c62828', color: '#fff' }}
+              >
+                Clear my today
+              </button>
+            </div>
+          </div>
+
           {/* Daily limit */}
           <div style={{ marginBottom: 12 }}>
             <div style={{ marginBottom: 4, color: '#555', fontSize: 13, fontWeight: 500 }}>
               Daily limit
             </div>
             <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-              <select name="dailyLimit" defaultValue={effectiveLimit ?? ''} style={select}>
-                <option value="1">1 per day</option>
-                <option value="2">2 per day</option>
-                <option value="0">Unlimited</option>
-                {config && (
-                  <option value="">Default (env: {config.dailyLimit})</option>
-                )}
-              </select>
+          <select name="dailyLimit" defaultValue={(() => {
+            const limit = state ? (state.dailyLimit ?? config!.dailyLimit) : config!.dailyLimit;
+            return limit ?? '';
+          })()} style={select}>
+            <option value="1">1 per day</option>
+            <option value="2">2 per day</option>
+            <option value="0">Unlimited</option>
+            {config && (
+              <option value="">Default (env: {config.dailyLimit})</option>
+            )}
+          </select>
+            </div>
+          </div>
+
+          {/* Card visibility display hint */}
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ marginBottom: 4, color: '#555', fontSize: 13, fontWeight: 500 }}>
+              Card visibility
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+          <select name="cardVisibilityState" defaultValue={(() => {
+            const v = config?.cardVisibilityState;
+            return v ?? '';
+          })()} style={select}>
+            <option value="">Not set (env default)</option>
+            <option value="visible_card">visible card</option>
+            <option value="is_a_card">is a card</option>
+          </select>
             </div>
           </div>
 

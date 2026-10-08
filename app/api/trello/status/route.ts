@@ -57,6 +57,7 @@ export async function GET(req: NextRequest): Promise<Response> {
         dailyLimitEnv: cfg.dailyLimit,
         dailyLimit,
         dailyLimitSource: state.dailyLimit != null ? 'database' : 'env',
+        cardVisibilityState: cfg.cardVisibilityState,
       },
       state,
       lastEvent,

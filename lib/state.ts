@@ -40,6 +40,29 @@ export type ClaimOutcome =
   | 'TRELLO_ERROR'
   | 'INTERNAL_ERROR';
 
+/** The source of the current 'taken for today' determination, when known. */
+export type TodayAddSource =
+  | 'automation'
+  | 'external_add'
+  | 'self_add'
+  | 'removed'
+  | 'code_review'
+  | 'membership_unknown'
+  | 'not_taken';
+
+/** Why the user is currently eligible or not, when the service has enough info. */
+export type EligibilityReason =
+  | 'not_taken'
+  | 'new_day'
+  | 'under_limit'
+  | 'unlimited'
+  | 'on_todo_card'
+  | 'on_doing_card'
+  | 'already_claimed_today'
+  | 'removed_from_claimed_card'
+  | 'manually_cleared_today'
+  | 'unknown';
+
 export interface ClaimState {
   userMemberId: string;
   /** YYYY-MM-DD (Africa/Lagos) of the last claim; null before the first claim. */
@@ -57,6 +80,21 @@ export interface ClaimState {
   /** Kill switch: when false, webhook still logs but does not claim. */
   enabled: boolean;
   updatedAt: string | null;
+
+  // Today context
+  /** Card the service associated with the user today, if any. */
+  claimedCardId: string | null;
+  /** How the user came to be 'taken' today, when known. */
+  howAdded: TodayAddSource;
+  /** When the service last re-checked live Trello membership on the board. */
+  lastMembershipCheckedAt: string | null;
+  /** Short note of the latest membership/removal determination. */
+  lastMembershipNote: string | null;
+  /**
+   * Optional card-visibility display hint, persisted per-user. NULL when not
+   * set (fall back to the CARD_VISIBILITY_STATE env default).
+   */
+  cardVisibilityState?: 'visible_card' | 'is_a_card' | null;
 }
 
 /** Everything recorded about one claim-path decision. */
@@ -110,9 +148,7 @@ export interface BlockedCard {
   cardId: string;
   cardName: string;
   addedAt: string;
-}
-
-export interface ClaimStore {
+}export interface ClaimStore {
   getState(memberId: string): Promise<ClaimState>;
   /**
    * Atomically claim a slot for today, enforcing the daily limit. Exactly one
@@ -128,7 +164,7 @@ export interface ClaimStore {
   ): Promise<SlotResult>;
   /** Undo a won slot whose Trello assignment failed (decrements today's count). */
   releaseClaim(memberId: string): Promise<void>;
-  /** Code Review move: unlock today's claim for this card. Returns true if changed. */
+  /** Code Review move: mark eligible true for this card without unlocking the slot. */
   setEligible(memberId: string, cardId: string): Promise<boolean>;
   /**
    * Set the per-user daily-limit override (0 = unlimited). NULL restores the
@@ -137,6 +173,24 @@ export interface ClaimStore {
   setDailyLimit(memberId: string, limit: number | null): Promise<void>;
   /** Toggle the kill switch (automation enabled/disabled). */
   setEnabled(memberId: string, enabled: boolean): Promise<void>;
+  /** Persist the optional card-visibility display hint (env-driven, not claiming logic). */
+  setCardVisibilityState(memberId: string, value: 'visible_card' | 'is_a_card' | null): Promise<void>;
+  /** Record today context: which card, how the user got taken, and the membership note. */
+  recordTodayContext(
+    memberId: string,
+    claimedCardId: string | null,
+    howAdded: string,
+    membershipNote: string,
+  ): Promise<void>;
+  /** Update howAdded + membership note without touching claimedCardId. */
+  recordMembershipNote(memberId: string, howAdded: string, membershipNote: string): Promise<void>;
+  /** Clear today's slot and eligibility (keeps the daily claim count). */
+  clearToday(
+    memberId: string,
+    prevCardId: string | null,
+    howAdded: string,
+    note: string,
+  ): Promise<void>;
   /**
    * Cards the user is a member of on `boardId`, from the webhook-fed cache.
    * `fresh` is true only when the cache has rows updated within the freshness
@@ -172,6 +226,12 @@ interface StateRow {
   daily_limit: number | null;
   enabled: boolean | null;
   updated_at: string | null;
+
+  claimed_card_id: string | null;
+  how_added: string | null;
+  last_membership_checked_at: string | null;
+  last_membership_note: string | null;
+  card_visibility_state: string | null;
 }
 
 interface EventRow {
@@ -202,6 +262,11 @@ function normalizeState(row: StateRow | undefined, memberId: string): ClaimState
       eligible: true,
       enabled: true,
       updatedAt: null,
+      claimedCardId: null,
+      howAdded: 'not_taken',
+      lastMembershipCheckedAt: null,
+      lastMembershipNote: null,
+      cardVisibilityState: null,
     };
   }
   return {
@@ -213,7 +278,45 @@ function normalizeState(row: StateRow | undefined, memberId: string): ClaimState
     dailyLimit: typeof row.daily_limit === 'number' ? row.daily_limit : null,
     enabled: row.enabled !== false, // default true
     updatedAt: row.updated_at ? new Date(row.updated_at).toISOString() : null,
+    claimedCardId:
+      row.claimed_card_id && row.claimed_card_id.length > 0 ? row.claimed_card_id : null,
+    howAdded: normalizeHowAdded(row.how_added),
+    lastMembershipCheckedAt:
+      row.last_membership_checked_at ? new Date(row.last_membership_checked_at).toISOString() : null,
+    lastMembershipNote: row.last_membership_note ?? null,
+    cardVisibilityState: normalizeCardVisibility(row.card_visibility_state),
   };
+}
+
+const HOW_ADDED_VALUES: readonly TodayAddSource[] = [
+  'automation',
+  'external_add',
+  'self_add',
+  'removed',
+  'code_review',
+  'membership_unknown',
+  'not_taken',
+];
+
+function normalizeHowAdded(raw: string | null | undefined): TodayAddSource {
+  if (raw && HOW_ADDED_VALUES.includes(raw as TodayAddSource)) {
+    return raw as TodayAddSource;
+  }
+  return 'membership_unknown';
+}
+
+const CARD_VISIBILITY_VALUES: readonly ('visible_card' | 'is_a_card')[] = [
+  'visible_card',
+  'is_a_card',
+];
+
+function normalizeCardVisibility(
+  raw: string | null | undefined,
+): 'visible_card' | 'is_a_card' | null {
+  if (raw && CARD_VISIBILITY_VALUES.includes(raw as typeof CARD_VISIBILITY_VALUES[number])) {
+    return raw as 'visible_card' | 'is_a_card';
+  }
+  return null;
 }
 
 interface SupabaseOptions {
@@ -289,20 +392,21 @@ export function getStore(): ClaimStore {
 export function createStore(): ClaimStore {
   return {
     async getState(memberId: string): Promise<ClaimState> {
-      const withLimit =
+      const query =
         `user_member_id=eq.${encodeURIComponent(memberId)}` +
-        '&select=date,card_id,claim_count,eligible,daily_limit,enabled,updated_at';
+        '&select=date,card_id,claim_count,eligible,daily_limit,enabled,updated_at,' +
+        'claimed_card_id,how_added,last_membership_checked_at,last_membership_note,card_visibility_state';
       try {
         const rows = await supabase<StateRow[]>('/claim_state', {
           method: 'GET',
-          query: withLimit,
+          query,
         });
         return normalizeState(Array.isArray(rows) ? rows[0] : undefined, memberId);
       } catch (err) {
-        // Pre-migration fallback: the daily_limit column may not be installed
-        // yet — read without it (limit defaults to null → env DAILY_LIMIT).
-        // This keeps the claim path live during the upgrade window.
-        if (!/daily_limit/i.test(err instanceof Error ? err.message : String(err))) throw err;
+        // Pre-migration fallback: today-context columns may not be installed yet.
+        // Read without them so the claim path stays live during the upgrade window.
+        const message = err instanceof Error ? err.message : String(err);
+        if (!/daily_limit|claimed_card_id|how_added|last_membership|card_visibility_state/i.test(message)) throw err;
         const rows = await supabase<StateRow[]>('/claim_state', {
           method: 'GET',
           query:
@@ -310,7 +414,9 @@ export function createStore(): ClaimStore {
             '&select=date,card_id,claim_count,eligible,enabled,updated_at',
         });
         const row = Array.isArray(rows) ? rows[0] : undefined;
-        if (row) row.daily_limit = null;
+        if (row) {
+          row.daily_limit = null;
+        }
         return normalizeState(row, memberId);
       }
     },
@@ -332,6 +438,69 @@ export function createStore(): ClaimStore {
         query: `on_conflict=user_member_id`,
         prefer: 'resolution=merge-duplicates',
         body: { user_member_id: memberId, enabled },
+      });
+    },
+
+    async setCardVisibilityState(memberId, value): Promise<void> {
+      await supabase('/claim_state', {
+        method: 'POST',
+        query: `on_conflict=user_member_id`,
+        prefer: 'resolution=merge-duplicates',
+        body: { user_member_id: memberId, card_visibility_state: value },
+      });
+    },
+
+    /** Record how the user came to be 'taken' today and note the current membership. */
+    async recordTodayContext(
+      memberId,
+      claimedCardId,
+      howAdded,
+      membershipNote,
+    ): Promise<void> {
+      await supabase('/claim_state', {
+        method: 'POST',
+        query: `on_conflict=user_member_id`,
+        prefer: 'resolution=merge-duplicates',
+        body: {
+          user_member_id: memberId,
+          claimed_card_id: claimedCardId,
+          how_added: howAdded,
+          last_membership_checked_at: new Date().toISOString(),
+          last_membership_note: membershipNote,
+        },
+      });
+    },
+
+    async recordMembershipNote(memberId, howAdded, membershipNote): Promise<void> {
+      await supabase('/claim_state', {
+        method: 'POST',
+        query: `on_conflict=user_member_id`,
+        prefer: 'resolution=merge-duplicates',
+        body: {
+          user_member_id: memberId,
+          how_added: howAdded,
+          last_membership_checked_at: new Date().toISOString(),
+          last_membership_note: membershipNote,
+        },
+      });
+    },
+
+    /** Clear today's slot and eligibility. Keeps the daily claim count intact. */
+    async clearToday(
+      memberId,
+      prevCardId,
+      howAdded,
+      note,
+    ): Promise<void> {
+      await supabase('/rpc/clear_today', {
+        method: 'POST',
+        prefer: 'return=minimal',
+        body: {
+          p_user: memberId,
+          p_card: prevCardId,
+          p_how_added: howAdded,
+          p_note: note,
+        },
       });
     },
 

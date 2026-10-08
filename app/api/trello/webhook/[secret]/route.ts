@@ -11,7 +11,7 @@
 
 import { NextRequest } from 'next/server';
 
-import { claimCard, type ClaimDeps } from '@/lib/claim';
+import { claimCard, isStillOnClaimedCard, tryReleaseOnRemoval, type ClaimDeps } from '@/lib/claim';
 import { getConfig } from '@/lib/config';
 import { initConnections } from '@/lib/connections';
 import { log, logError, sanitizeError } from '@/lib/log';
@@ -20,6 +20,7 @@ import { getStore } from '@/lib/state';
 import { Timing } from '@/lib/timing';
 import { createTrelloClient } from '@/lib/trello';
 import { classifyEvent, parseWebhookPayload } from '@/lib/webhook';
+import type { TodayAddSource } from '@/lib/state';
 
 // Warm the Trello/Supabase keep-alive connections before any claim runs.
 initConnections();
@@ -95,6 +96,43 @@ export async function POST(
     } catch (err) {
       logError('CACHE_SYNC_FAILED', { cardId: parsed.cardId, error: sanitizeError(err) });
     }
+
+    // Removal detection: if the user was previously associated with a card today,
+    // and live Trello now shows they are no longer on it, clear today so they can
+    // take another card for the rest of the Lagos day.
+    if (parsed.cardId && parsed.boardId === cfg.trelloBoardId) {
+      try {
+        const store = getStore();
+        const state = await store.getState(cfg.trelloMemberId);
+        if (state.claimedCardId && state.claimedCardId !== parsed.cardId) {
+          const stillOnClaimed = await isStillOnClaimedCard(
+            createTrelloClient(),
+            cfg.trelloMemberId,
+            cfg.trelloBoardId,
+            state.claimedCardId,
+          );
+          if (stillOnClaimed === false) {
+            await tryReleaseOnRemoval(
+              store,
+              cfg.trelloMemberId,
+              cfg.trelloBoardId,
+              createTrelloClient(),
+              state.claimedCardId,
+              state.howAdded,
+            );
+            log('CLAIM_DAY_CLEARED_ON_REMOVAL', {
+              cardId: parsed.cardId,
+              claimedCardId: state.claimedCardId,
+            });
+          }
+        }
+      } catch (err) {
+        logError('REMOVAL_CHECK_FAILED', {
+          cardId: parsed.cardId,
+          error: sanitizeError(err),
+        });
+      }
+    }
   }
 
   const classification = classifyEvent(parsed, cfg);
@@ -132,7 +170,18 @@ export async function POST(
     if (classification.kind === 'eligibility') {
       // Code Review is an eligibility event only — it never assigns a card, and
       // per the one-per-day rule it does NOT unlock the daily slot either.
-      // Only a new Lagos midnight resets eligibility. Acknowledge and log.
+      // Only a new Lagos midnight resets eligibility. Acknowledge, log, and note
+      // the state change so the status page can explain why the user is still taken.
+      const store = getStore();
+      const state = await store.getState(cfg.trelloMemberId);
+      if (state.claimedCardId && state.claimedCardId === parsed.cardId) {
+        await store.recordTodayContext(
+          cfg.trelloMemberId,
+          state.claimedCardId,
+          'code_review',
+          `claimed card moved to Code Review; still taken until Lagos midnight`,
+        );
+      }
       log('CODE_REVIEW_MOVE', { cardId: parsed.cardId, listId: parsed.listId });
       return new Response('OK', { status: 200 });
     }
