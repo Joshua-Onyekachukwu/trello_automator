@@ -134,16 +134,6 @@ export interface SlotResult {
   won: boolean;
 }
 
-export interface ScanEventInsert {
-  scanType: string;
-  cardsScanned: number;
-  cardsClaimed: number;
-  cardsSkipped: number;
-  externalClaimsSynced: number;
-  processingTimeMs: number;
-  details: Record<string, unknown> | null;
-}
-
 export interface BlockedCard {
   cardId: string;
   cardName: string;
@@ -208,8 +198,6 @@ export interface BlockedCard {
   syncUserCard(cardId: string, boardId: string, listId: string | null): Promise<void>;
   insertEvent(event: ClaimEventInsert): Promise<void>;
   getLatestEvent(): Promise<ClaimEventRow | null>;
-  /** Insert a scan audit trail event. */
-  insertScanEvent(event: ScanEventInsert): Promise<void>;
   /** Get all blocked card IDs. */
   getBlockedCards(): Promise<BlockedCard[]>;
   /** Add a card to the blocklist. */
@@ -617,22 +605,6 @@ export function createStore(): ClaimStore {
         errorMessage: row.error_message,
         createdAt: new Date(row.created_at).toISOString(),
       };
-    },
-
-    async insertScanEvent(event): Promise<void> {
-      await supabase('/scan_events', {
-        method: 'POST',
-        prefer: 'return=minimal',
-        body: {
-          scan_type: event.scanType,
-          cards_scanned: event.cardsScanned,
-          cards_claimed: event.cardsClaimed,
-          cards_skipped: event.cardsSkipped,
-          external_claims_synced: event.externalClaimsSynced,
-          processing_time_ms: event.processingTimeMs,
-          details: event.details,
-        },
-      });
     },
 
     async getBlockedCards(): Promise<BlockedCard[]> {

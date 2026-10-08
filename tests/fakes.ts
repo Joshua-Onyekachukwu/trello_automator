@@ -342,12 +342,6 @@ export class FakeClaimStore implements ClaimStore {
     };
   }
 
-  readonly scanRecords: Array<{ scanType: string; cardsScanned: number; cardsClaimed: number; cardsSkipped: number; externalClaimsSynced: number; processingTimeMs: number; details: Record<string, unknown> | null }> = [];
-
-  async insertScanEvent(event: import('../lib/state').ScanEventInsert): Promise<void> {
-    this.scanRecords.push({ ...event, details: event.details ? { ...event.details } : null });
-  }
-
   blockedCards: Array<{ cardId: string; cardName: string; addedAt: string }> = [];
 
   async getBlockedCards(): Promise<Array<{ cardId: string; cardName: string; addedAt: string }>> {
