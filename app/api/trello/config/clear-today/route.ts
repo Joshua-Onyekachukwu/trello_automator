@@ -1,7 +1,9 @@
 /** Admin endpoint: clear today's slot and eligibility without changing the daily claim count.
  *
- *   POST /api/trello/config/clear-today   header: x-admin-token: <WEBHOOK_SECRET>
- *   body: { "reason"?: string }
+ *   POST /api/trello/config/clear-today
+ *     - status-page form (application/x-www-form-urlencoded): token field +
+ *       303 redirect back to /?cleared=1 — no client JS required.
+ *     - JSON API: header x-admin-token: <WEBHOOK_SECRET>, body { "reason"?: string }.
  *
  * This is the manual override for "I no longer have a project for today".
  * It keeps the daily claim count intact (so repeated clears do not silently
@@ -26,20 +28,41 @@ function json(data: unknown, status = 200): Response {
 
 export async function POST(req: NextRequest): Promise<Response> {
   const cfg = getConfig();
-  const header = req.headers.get('x-admin-token') ?? '';
-  if (!safeEqual(header, cfg.webhookSecret)) {
+  const contentType = req.headers.get('content-type') ?? '';
+  const isForm = !contentType.includes('application/json');
+
+  // Parse first (no side effects), then authenticate, then touch the store.
+  let authorized = safeEqual(req.headers.get('x-admin-token') ?? '', cfg.webhookSecret);
+  let reason = 'manual reset';
+
+  if (isForm) {
+    // The status page form carries the admin token in a `token` field. The
+    // form contains two password inputs with the same name (manual-reset
+    // section and Save) — accept whichever one was filled in.
+    let form: FormData;
+    try {
+      form = await req.formData();
+    } catch {
+      return new Response('Invalid form data', { status: 400 });
+    }
+    authorized = form
+      .getAll('token')
+      .some((t) => safeEqual(String(t), cfg.webhookSecret));
+    const r = form.get('reason');
+    if (typeof r === 'string' && r.length > 0) reason = r;
+  } else {
+    let body: { reason?: unknown };
+    try {
+      body = (await req.json()) as { reason?: unknown };
+    } catch {
+      return new Response('Invalid JSON', { status: 400 });
+    }
+    if (typeof body.reason === 'string' && body.reason.length > 0) reason = body.reason;
+  }
+
+  if (!authorized) {
     return new Response('Unauthorized', { status: 401 });
   }
-
-  let body: { reason?: unknown };
-  try {
-    body = (await req.json()) as { reason?: unknown };
-  } catch {
-    return new Response('Invalid JSON', { status: 400 });
-  }
-
-  const reason =
-    typeof body.reason === 'string' && body.reason.length > 0 ? body.reason : 'manual clear-today';
 
   const store = getStore();
   let prevCardId: string | null = null;
@@ -55,10 +78,21 @@ export async function POST(req: NextRequest): Promise<Response> {
   try {
     await store.clearToday(cfg.trelloMemberId, prevCardId, howAdded, `manual clear-today: ${reason}`);
   } catch (err) {
+    if (isForm) {
+      return new Response(`Failed to clear: ${err instanceof Error ? err.message : String(err)}`, {
+        status: 500,
+      });
+    }
     return json(
       { ok: false, error: err instanceof Error ? err.message : String(err) },
       500,
     );
+  }
+
+  // Form submit: bounce back to the status page so it re-renders with the
+  // cleared state and a confirmation banner.
+  if (isForm) {
+    return new Response(null, { status: 303, headers: { Location: '/?cleared=1' } });
   }
 
   return json({

@@ -137,6 +137,41 @@ describe('getState', () => {
     expect(state.eligible).toBe(false);
     expect(state.updatedAt).toBe('2026-08-14T10:00:00.000Z');
   });
+
+  it('normalizes an allowlisted card_visibility_state', async () => {
+    stubFetch(() => ({ body: [{ card_visibility_state: 'is_a_card' }] }));
+    const state = await createStore().getState('m');
+    expect(state.cardVisibilityState).toBe('is_a_card');
+  });
+
+  it('drops a tampered card_visibility_state value (defense in depth)', async () => {
+    stubFetch(() => ({ body: [{ card_visibility_state: '<script>alert(1)</script>' }] }));
+    const state = await createStore().getState('m');
+    expect(state.cardVisibilityState).toBeNull();
+  });
+});
+
+describe('setCardVisibilityState', () => {
+  it('persists a value via merge-duplicates upsert', async () => {
+    const calls = stubFetch(() => ({ status: 201, body: [{ user_member_id: 'm' }] }));
+    await createStore().setCardVisibilityState('m', 'visible_card');
+    expect(calls[0].method).toBe('POST');
+    expect(decodeURIComponent(calls[0].url)).toContain('on_conflict=user_member_id');
+    expect(calls[0].headers.Prefer).toBe('resolution=merge-duplicates');
+    expect(calls[0].body).toMatchObject({
+      user_member_id: 'm',
+      card_visibility_state: 'visible_card',
+    });
+  });
+
+  it('clears with null to restore the env default', async () => {
+    const calls = stubFetch(() => ({ status: 201, body: [{ user_member_id: 'm' }] }));
+    await createStore().setCardVisibilityState('m', null);
+    expect(calls[0].body).toMatchObject({
+      user_member_id: 'm',
+      card_visibility_state: null,
+    });
+  });
 });
 
 describe('tryClaim (claim_slot RPC)', () => {

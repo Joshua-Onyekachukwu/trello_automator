@@ -71,10 +71,11 @@ const button: React.CSSProperties = { padding: '4px 14px' };
 export default async function HomePage({
   searchParams,
 }: {
-  searchParams: Promise<{ saved?: string }>;
+  searchParams: Promise<{ saved?: string; cleared?: string }>;
 }): Promise<React.ReactElement> {
   const params = await searchParams;
   const saved = params.saved === '1';
+  const cleared = params.cleared === '1';
 
   let config: ReturnType<typeof getConfig> | null = null;
   let state: Awaited<ReturnType<ReturnType<typeof getStore>['getState']>> | null = null;
@@ -194,6 +195,11 @@ export default async function HomePage({
       {saved && (
         <p style={{ color: '#1a7f37', fontSize: 13, margin: '0 0 16px' }}>✓ Daily limit saved.</p>
       )}
+      {cleared && (
+        <p style={{ color: '#1a7f37', fontSize: 13, margin: '0 0 16px' }}>
+          ✓ Today cleared — eligible again for the rest of the day.
+        </p>
+      )}
 
       <div style={row}>
         <div style={label}>Status</div>
@@ -209,23 +215,11 @@ export default async function HomePage({
         </div>
       </div>
       <div style={row}>
-        <div style={label}>Site Board</div>
-        <div style={value}>
-          Site Board (read-only for retry/audit; not used for claiming or eligibility).
-        </div>
-      </div>
-      <div style={row}>
         <div style={label}>Webhook</div>
         <div style={value}>
           {webhookStatus === 'connected' && <span style={{ color: '#1a7f37' }}>CONNECTED</span>}
           {webhookStatus === 'disconnected' && <span style={{ color: '#c62828' }}>DISCONNECTED</span>}
           {webhookStatus === 'unknown' && 'UNKNOWN'}
-        </div>
-      </div>
-      <div style={row}>
-        <div style={label}>Site Board</div>
-        <div style={value}>
-          {config?.trelloBoardId ? `${config.trelloBoardId.slice(0, 8)}…<wbr />` : '—'}
         </div>
       </div>
       <div style={row}>
@@ -424,20 +418,20 @@ export default async function HomePage({
         </div>
       </div>
       <div style={row}>
-        <div style={label}>Site Board</div>
-        <div style={value}>
-          Site Board (read-only for retry/audit; not used for claiming or eligibility).
-        </div>
-      </div>
-      <div style={row}>
         <div style={label}>Card visibility</div>
         <div style={value}>
           {(() => {
             if (!config) return '—';
-            const visibility = config.cardVisibilityState;
-            if (visibility === 'visible_card') return 'visible card';
-            if (visibility === 'is_a_card') return 'is a card';
-            return '—';
+            const persisted = state?.cardVisibilityState ?? null;
+            const visibility = persisted ?? config.cardVisibilityState;
+            const text =
+              visibility === 'visible_card'
+                ? 'visible card'
+                : visibility === 'is_a_card'
+                  ? 'is a card'
+                  : null;
+            if (!text) return '—';
+            return `${text} (${persisted != null ? 'custom' : 'env default'})`;
           })()}
         </div>
       </div>
@@ -544,10 +538,7 @@ export default async function HomePage({
               Card visibility
             </div>
             <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
-          <select name="cardVisibilityState" defaultValue={(() => {
-            const v = config?.cardVisibilityState;
-            return v ?? '';
-          })()} style={select}>
+          <select name="cardVisibilityState" defaultValue={state?.cardVisibilityState ?? ''} style={select}>
             <option value="">Not set (env default)</option>
             <option value="visible_card">visible card</option>
             <option value="is_a_card">is a card</option>

@@ -4,9 +4,14 @@
  *   POST /api/trello/config   header: x-admin-token: <WEBHOOK_SECRET>
  *   body: { "dailyLimit": 1 | 2 | 0 }   (0 = unlimited)
  *   body: { "enabled": true | false }   (kill switch)
+ *   body: { "cardVisibilityState": "visible_card" | "is_a_card" | null | "" }
+ *          - key absent  = leave the persisted value unchanged
+ *          - null or ""  = clear it (restore the CARD_VISIBILITY_STATE env default)
+ *          - any other value is rejected with 400
  *
- * Also accepts a plain HTML form (dailyLimit + token + enabled fields) so the
- * status page can offer the control without any client JavaScript.
+ * Also accepts a plain HTML form (dailyLimit + token + enabled +
+ * cardVisibilityState fields) so the status page can offer the control without
+ * any client JavaScript.
  *
  * The limit and enabled flag are stored per-user in the database
  * (claim_state) and take effect immediately — no Vercel env change or
@@ -43,13 +48,17 @@ export async function POST(req: NextRequest): Promise<Response> {
   let headerToken = req.headers.get('x-admin-token') ?? '';
   let rawLimit: unknown;
   let rawEnabled: unknown;
-  let rawCardVisibilityState: string | null = null;
+  // undefined = field not submitted (leave the persisted value alone);
+  // '' = explicitly cleared (restore the env default).
+  let rawCardVisibilityState: string | undefined;
   if (contentType.includes('application/json')) {
     try {
       const body = (await req.json()) as { dailyLimit?: unknown; enabled?: unknown; cardVisibilityState?: unknown };
       rawLimit = body.dailyLimit;
       rawEnabled = body.enabled;
-      rawCardVisibilityState = body.cardVisibilityState == null ? null : String(body.cardVisibilityState);
+      if ('cardVisibilityState' in body) {
+        rawCardVisibilityState = body.cardVisibilityState == null ? '' : String(body.cardVisibilityState);
+      }
     } catch {
       return new Response('Invalid JSON', { status: 400 });
     }
@@ -64,7 +73,7 @@ export async function POST(req: NextRequest): Promise<Response> {
     const cb = form.get('enabled');
     rawEnabled = cb === null ? false : cb;
     const visibility = form.get('cardVisibilityState');
-    rawCardVisibilityState = visibility === null || visibility === '' ? null : String(visibility);
+    if (visibility !== null) rawCardVisibilityState = String(visibility);
   }
 
   if (!safeEqual(headerToken, cfg.webhookSecret)) {
@@ -102,15 +111,22 @@ export async function POST(req: NextRequest): Promise<Response> {
     }
   }
 
-  if (rawCardVisibilityState !== null) {
-    const visibility =
-      rawCardVisibilityState === 'visible_card' || rawCardVisibilityState === 'is_a_card'
-        ? rawCardVisibilityState
-        : null;
-    try {
-      await store.setCardVisibilityState(cfg.trelloMemberId, visibility);
-    } catch (err) {
-      errors.push(`Failed to save card visibility: ${err instanceof Error ? err.message : String(err)}`);
+  if (rawCardVisibilityState !== undefined) {
+    if (rawCardVisibilityState === '') {
+      // Explicit clear: fall back to the CARD_VISIBILITY_STATE env default.
+      try {
+        await store.setCardVisibilityState(cfg.trelloMemberId, null);
+      } catch (err) {
+        errors.push(`Failed to clear card visibility: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else if (rawCardVisibilityState === 'visible_card' || rawCardVisibilityState === 'is_a_card') {
+      try {
+        await store.setCardVisibilityState(cfg.trelloMemberId, rawCardVisibilityState);
+      } catch (err) {
+        errors.push(`Failed to save card visibility: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else {
+      errors.push("cardVisibilityState must be 'visible_card', 'is_a_card', or empty to use the env default");
     }
   }
 
