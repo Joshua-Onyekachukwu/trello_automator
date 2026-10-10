@@ -11,31 +11,60 @@
  *   2. Application overhead (decision + instrumentation) is single-digit
  *      milliseconds with in-memory fakes.
  *   3. The Timing snapshot records every milestone the spec requires.
+ *
+ * Simulated-latency tests run on a fake clock (vi.useFakeTimers driving both
+ * setTimeout and performance.now), so their durations are exact — assertions
+ * measure the pipeline's structure (parallel vs sequential reads, latency
+ * budget) instead of the wall clock of whatever else the machine is doing.
+ * Only the raw-overhead test runs against the real clock, by design.
  */
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { claimCard } from '../lib/claim';
 import { Timing } from '../lib/timing';
+import type { ClaimRecord } from '../lib/state';
 import { card, FakeClaimStore, FakeTrello, makeConfig } from './fakes';
+
+/**
+ * Run a claim on a simulated clock: timers and performance.now advance
+ * deterministically, so a 60 ms fake read always measures exactly 60 ms
+ * regardless of machine load. The pipeline drives its own timers to
+ * completion before the claim settles.
+ */
+async function runOnSimulatedClock(run: () => Promise<ClaimRecord>): Promise<ClaimRecord> {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] });
+  try {
+    const pending = run();
+    await vi.runAllTimersAsync();
+    return await pending;
+  } finally {
+    vi.useRealTimers();
+  }
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe('performance', () => {
   it('fast path: a fresh membership cache drops the my-cards GET (checks ≈ one read)', async () => {
     // getCard is slower than getMyCards: 70 ms vs 50 ms. With a fresh cache the
     // claim path skips the my-cards GET entirely, so checks ≈ the single getCard
     // read (~70 ms) — two sequential reads would be 120 ms.
-    const trello = new FakeTrello([card('A', 'list-todo')], 50);
-    trello.getCard = async (id) => {
-      await new Promise((r) => setTimeout(r, 70));
-      return trello.cards.get(id)!;
-    };
-    const store = new FakeClaimStore();
-    // User is on one unrelated card (not To Do / Doing); cache is fresh.
-    store.userCardCache = [{ id: 'other', idList: 'list-other', idBoard: 'board-1', name: '' }];
-    store.cacheFresh = true;
-    const timing = new Timing();
-
-    const record = await claimCard('A', { config: makeConfig(), trello, store, timing });
+    const record = await runOnSimulatedClock(() => {
+      const trello = new FakeTrello([card('A', 'list-todo')], 50);
+      trello.getCard = async (id) => {
+        await new Promise((r) => setTimeout(r, 70));
+        return trello.cards.get(id)!;
+      };
+      const store = new FakeClaimStore();
+      // User is on one unrelated card (not To Do / Doing); cache is fresh.
+      store.userCardCache = [{ id: 'other', idList: 'list-other', idBoard: 'board-1', name: '' }];
+      store.cacheFresh = true;
+      const timing = new Timing();
+      return claimCard('A', { config: makeConfig(), trello, store, timing });
+    });
     const checksMs = record.details.trelloChecksMs as number;
 
     expect(record.outcome).toBe('CLAIMED');
@@ -95,15 +124,17 @@ describe('performance', () => {
   });
 
   it('payload-trust: complete payload skips the target-card GET (one parallel read, not two)', async () => {
-    const trello = new FakeTrello([card('A', 'list-todo')], 60, 80);
-    const store = new FakeClaimStore();
-    const timing = new Timing();
-
-    const record = await claimCard(
-      'A',
-      { config: makeConfig(), trello, store, timing },
-      { idBoard: 'board-1', idList: 'list-todo', idMembers: [] },
-    );
+    let trello!: FakeTrello;
+    const record = await runOnSimulatedClock(() => {
+      trello = new FakeTrello([card('A', 'list-todo')], 60, 80);
+      const store = new FakeClaimStore();
+      const timing = new Timing();
+      return claimCard(
+        'A',
+        { config: makeConfig(), trello, store, timing },
+        { idBoard: 'board-1', idList: 'list-todo', idMembers: [] },
+      );
+    });
 
     expect(record.outcome).toBe('CLAIMED');
     expect(trello.getCardCalls).toBe(0);
@@ -116,13 +147,14 @@ describe('performance', () => {
   it('simulated full pipeline: fast-path checks + assignment fit the latency budget', async () => {
     // Simulated realistic network: 60 ms GET card, 60 ms GET my cards, 80 ms POST.
     // A fresh cache drops the my-cards GET, so checks ≈ the one Trello read.
-    const trello = new FakeTrello([card('A', 'list-todo')], 60, 80);
-    const store = new FakeClaimStore();
-    store.userCardCache = [{ id: 'other', idList: 'list-other', idBoard: 'board-1', name: '' }];
-    store.cacheFresh = true;
-    const timing = new Timing();
-
-    const record = await claimCard('A', { config: makeConfig(), trello, store, timing });
+    const record = await runOnSimulatedClock(() => {
+      const trello = new FakeTrello([card('A', 'list-todo')], 60, 80);
+      const store = new FakeClaimStore();
+      store.userCardCache = [{ id: 'other', idList: 'list-other', idBoard: 'board-1', name: '' }];
+      store.cacheFresh = true;
+      const timing = new Timing();
+      return claimCard('A', { config: makeConfig(), trello, store, timing });
+    });
     const d = record.details;
 
     // checks ≈ 60 ms (one read), assignment ≈ 80 ms, total ≈ 140 ms + overhead.
