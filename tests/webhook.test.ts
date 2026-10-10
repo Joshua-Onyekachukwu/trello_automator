@@ -51,7 +51,22 @@ describe('parseWebhookPayload', () => {
       listBeforeId: 'list-backlog',
       closed: undefined,
       idMembers: undefined,
+      memberId: undefined,
     });
+  });
+
+  it('extracts idMember on membership actions (add/remove) — the payload has no idMembers array', () => {
+    // Verified against live Trello action payloads (2026-08-15 test-board
+    // actions): addMemberToCard carries board, card{id,idShort,name,shortLink},
+    // idMember, member — no idMembers, no idList.
+    const parsed = parseWebhookPayload({
+      action: { type: 'addMemberToCard', data: { card: { id: 'abc' }, idMember: 'member-1' } },
+      model: { id: 'board-1' },
+    });
+    expect(parsed?.memberId).toBe('member-1');
+    expect(parsed?.cardId).toBe('abc');
+    expect(parsed?.idMembers).toBeUndefined();
+    expect(parsed?.listId).toBeUndefined();
   });
 
   it('extracts idMembers when the payload carries them (lets the claim path skip the GET)', () => {

@@ -23,6 +23,14 @@ export interface ParsedWebhook {
    * round trip. Undefined when the payload does not carry the array.
    */
   idMembers: string[] | undefined;
+  /**
+   * For membership actions (addMemberToCard / removeMemberFromCard): the member
+   * being added or removed (data.idMember). Undefined for other action types —
+   * those payloads never carry it. The webhook handler uses it to sync the
+   * configured user's own membership into the cache, which the generic
+   * idMembers path above cannot see because these payloads lack the array.
+   */
+  memberId: string | undefined;
 }
 
 export type EventKind = 'claim' | 'eligibility' | 'ignore';
@@ -68,6 +76,7 @@ export function parseWebhookPayload(payload: unknown): ParsedWebhook | null {
     idMembers: Array.isArray(card?.idMembers)
       ? (card.idMembers as unknown[]).filter((m): m is string => typeof m === 'string')
       : undefined,
+    memberId: typeof data.idMember === 'string' ? data.idMember : undefined,
   };
 }
 

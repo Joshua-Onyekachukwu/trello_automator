@@ -227,10 +227,23 @@ export async function claimCard(
       timing.markAssignmentCompleted();
     }
 
-    // Record that the automation claimed this card today.
-    await store.recordTodayContext(memberId, cardId, 'automation', 'automation claimed this card');
-
-    return await finish(store, makeRecord(cardId, 'CLAIMED', timing, { date: today }));
+    // Record that the automation claimed this card today. The assignment above
+    // already succeeded on Trello, so this bookkeeping write must never fall
+    // through to the catch below — releasing the slot for a card the user is
+    // actually on would silently stop enforcing the daily limit. noteTodayContext
+    // swallows and logs the failure for that reason. The two post-assignment
+    // Supabase writes also run in parallel: one fewer round trip between
+    // "assigned on Trello" and "webhook acknowledged".
+    const record = makeRecord(cardId, 'CLAIMED', timing, { date: today });
+    await Promise.all([
+      noteTodayContext(store, memberId, {
+        howAdded: 'automation',
+        note: 'automation claimed this card',
+        cardId,
+      }),
+      finish(store, record),
+    ]);
+    return record;
   } catch (err) {
     const error = sanitizeError(err);
     // If we held the slot but the assignment (or anything after) failed, undo

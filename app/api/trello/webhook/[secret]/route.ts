@@ -135,6 +135,49 @@ export async function POST(
     }
   }
 
+  // Membership events: Trello's addMemberToCard / removeMemberFromCard payloads
+  // carry no idMembers / idList (verified against live action payloads,
+  // 2026-10-10), so the generic cache-sync above never sees them — without
+  // this block a manual self-add stays invisible to the next claim until the
+  // cache goes stale, and removal-based re-eligibility never fires promptly.
+  // Sync the user's own membership with one live GET so conditions 3 & 4 see
+  // manual picks immediately, and clear the day when the user is removed from
+  // their claimed card. Events about other members are ignored here.
+  if (
+    parsed.cardId &&
+    parsed.boardId === cfg.trelloBoardId &&
+    parsed.memberId === cfg.trelloMemberId &&
+    (parsed.actionType === 'addMemberToCard' || parsed.actionType === 'removeMemberFromCard')
+  ) {
+    try {
+      const store = getStore();
+      const trello = createTrelloClient();
+      const card = await trello.getCard(parsed.cardId);
+      const stillMember = card.idMembers.includes(cfg.trelloMemberId);
+      await store.syncUserCard(card.id, cfg.trelloBoardId, stillMember ? card.idList : null);
+
+      if (!stillMember) {
+        const state = await store.getState(cfg.trelloMemberId);
+        const cleared = await tryReleaseOnRemoval(
+          store,
+          cfg.trelloMemberId,
+          cfg.trelloBoardId,
+          trello,
+          state.claimedCardId,
+          state.howAdded,
+        );
+        if (cleared) {
+          log('CLAIM_DAY_CLEARED_ON_REMOVAL', {
+            cardId: card.id,
+            claimedCardId: state.claimedCardId,
+          });
+        }
+      }
+    } catch (err) {
+      logError('MEMBERSHIP_SYNC_FAILED', { cardId: parsed.cardId, error: sanitizeError(err) });
+    }
+  }
+
   const classification = classifyEvent(parsed, cfg);
 
   try {

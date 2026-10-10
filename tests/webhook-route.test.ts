@@ -10,12 +10,24 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { claimCard } from '@/lib/claim';
 import { getConfig } from '@/lib/config';
 import { getStore } from '@/lib/state';
+import { createTrelloClient } from '@/lib/trello';
 import { HEAD, POST } from '../app/api/trello/webhook/[secret]/route';
-import { FakeClaimStore, makeConfig } from './fakes';
+import { card, FakeClaimStore, FakeTrello, makeConfig } from './fakes';
 
 vi.mock('@/lib/config', () => ({ getConfig: vi.fn() }));
 vi.mock('@/lib/state', () => ({ getStore: vi.fn() }));
-vi.mock('@/lib/claim', () => ({ claimCard: vi.fn() }));
+// Only claimCard is faked; tryReleaseOnRemoval etc. stay real (they are part
+// of what these tests exercise via the route).
+vi.mock('@/lib/claim', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/claim')>()),
+  claimCard: vi.fn(),
+}));
+// Only the factory is faked — everything else (TrelloApiError, types) is real
+// so the fakes in ./fakes keep working.
+vi.mock('@/lib/trello', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/trello')>()),
+  createTrelloClient: vi.fn(),
+}));
 
 const cfg = makeConfig();
 
@@ -124,5 +136,76 @@ describe('webhook route', () => {
     vi.mocked(claimCard).mockRejectedValue(new Error('boom'));
     const res = await callPost(trelloPayload('createCard', 'cardA', 'list-todo'));
     expect(res.status).toBe(200);
+  });
+
+  it('manual self-add: addMemberToCard for the configured member syncs the card into the cache', async () => {
+    // Trello's addMemberToCard payload has no idMembers/idList — the route
+    // must fetch the card live so the next claim sees the manual pick.
+    const fakeTrello = new FakeTrello([card('X', 'list-todo', { idMembers: ['member-1'] })]);
+    vi.mocked(createTrelloClient).mockReturnValue(fakeTrello);
+    const store = new FakeClaimStore();
+    vi.mocked(getStore).mockReturnValue(store);
+
+    const res = await callPost({
+      action: { type: 'addMemberToCard', data: { card: { id: 'X' }, idMember: 'member-1' } },
+      model: { id: cfg.trelloBoardId },
+    });
+
+    expect(res.status).toBe(200);
+    expect(fakeTrello.getCardCalls).toBe(1);
+    expect(store.syncUserCardCalls).toEqual([{ cardId: 'X', boardId: 'board-1', listId: 'list-todo' }]);
+    expect(claimCard).not.toHaveBeenCalled(); // membership events never claim
+  });
+
+  it('addMemberToCard about another member is ignored (no Trello call, no sync)', async () => {
+    const fakeTrello = new FakeTrello([card('X', 'list-todo', { idMembers: ['someone-else'] })]);
+    vi.mocked(createTrelloClient).mockReturnValue(fakeTrello);
+    const store = new FakeClaimStore();
+    vi.mocked(getStore).mockReturnValue(store);
+
+    const res = await callPost({
+      action: { type: 'addMemberToCard', data: { card: { id: 'X' }, idMember: 'someone-else' } },
+      model: { id: cfg.trelloBoardId },
+    });
+
+    expect(res.status).toBe(200);
+    expect(fakeTrello.getCardCalls).toBe(0);
+    expect(store.syncUserCardCalls).toHaveLength(0);
+  });
+
+  it('removal: removeMemberFromCard from the claimed card clears the day (re-eligible, count kept)', async () => {
+    // The user is no longer on card X (live GET shows empty idMembers): the
+    // day must open up again for the rest of Lagos day, without touching the
+    // daily claim count.
+    const fakeTrello = new FakeTrello([card('X', 'list-todo')]);
+    vi.mocked(createTrelloClient).mockReturnValue(fakeTrello);
+    const store = new FakeClaimStore();
+    store.state = {
+      userMemberId: 'member-1',
+      date: '2026-08-14',
+      cardId: 'X',
+      claimCount: 1,
+      eligible: false,
+      enabled: true,
+      updatedAt: null,
+      claimedCardId: 'X',
+      howAdded: 'automation',
+      lastMembershipCheckedAt: null,
+      lastMembershipNote: null,
+    };
+    vi.mocked(getStore).mockReturnValue(store);
+
+    const res = await callPost({
+      action: { type: 'removeMemberFromCard', data: { card: { id: 'X' }, idMember: 'member-1' } },
+      model: { id: cfg.trelloBoardId },
+    });
+
+    expect(res.status).toBe(200);
+    expect(store.syncUserCardCalls).toEqual([{ cardId: 'X', boardId: 'board-1', listId: null }]);
+    expect(store.state.eligible).toBe(true);
+    expect(store.state.date).toBe('');
+    expect(store.state.claimCount).toBe(1); // count is never inflated/cleared
+    expect(store.state.howAdded).toBe('removed');
+    expect(claimCard).not.toHaveBeenCalled();
   });
 });

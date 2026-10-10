@@ -398,6 +398,24 @@ describe('claimCard', () => {
     expect(store.state.claimedCardId).toBe('A');
   });
 
+  it('today-context write failure after assignment → still CLAIMED, slot NOT released', async () => {
+    // Regression: a pre-migration DB makes recordTodayContext 400 (missing
+    // columns). The Trello assignment has already succeeded at that point, so
+    // the failure must not fall through to the release path — the user is on
+    // the card and the day must stay claimed.
+    const trello = new FakeTrello([card('A', 'list-todo')]);
+    const store = new FakeClaimStore();
+    store.recordTodayContext = async () => {
+      throw new Error('Supabase POST /claim_state failed: HTTP 400 missing column');
+    };
+    const record = await claimCard('A', makeDeps(trello, store));
+
+    expect(record.outcome).toBe('CLAIMED');
+    expect(trello.addMemberCalls).toHaveLength(1); // the assignment stands
+    expect(store.state.claimCount).toBe(1); // the slot was NOT released
+    expect(store.state.cardId).toBe('A');
+  });
+
   it('Trello API failure during checks → TRELLO_ERROR, no claim, lock released', async () => {
     class NetworkDownTrello extends FakeTrello {
       override async getCard(): Promise<TrelloCard> {
